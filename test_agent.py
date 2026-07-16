@@ -17,6 +17,7 @@ _spec.loader.exec_module(agent)
 def work(tmp_path, monkeypatch):
     monkeypatch.setattr(agent, "WORKDIR", tmp_path)
     agent._read_hashes.clear()
+    agent._UNDO.clear()
     return tmp_path
 
 
@@ -461,3 +462,64 @@ def test_parser_yes_flag():
 def test_box_frames_content():
     box = agent._box(["hello"])
     assert box.startswith("╭") and box.rstrip().endswith("╯") and "hello" in box
+
+
+# ------------------------------------------------------------------ /undo
+def test_undo_restores_edit(work):
+    (work / "f.py").write_text("a = 1\n")
+    agent.do_edit({"path": "f.py", "old_string": "a = 1", "new_string": "a = 2"})
+    assert (work / "f.py").read_text() == "a = 2\n"
+    msg = agent._undo_last()
+    assert "restored" in msg and (work / "f.py").read_text() == "a = 1\n"
+
+
+def test_undo_removes_new_file(work):
+    agent.do_write({"path": "new.txt", "content": "hi"})
+    assert (work / "new.txt").exists()
+    msg = agent._undo_last()
+    assert "removed" in msg and not (work / "new.txt").exists()
+
+
+def test_undo_restores_overwritten_file(work):
+    (work / "keep.txt").write_text("original")
+    agent.do_write({"path": "keep.txt", "content": "changed"})
+    agent._undo_last()
+    assert (work / "keep.txt").read_text() == "original"
+
+
+def test_undo_empty_stack(work):
+    assert agent._undo_last() == "nothing to undo"
+
+
+def test_undo_walks_back_multiple(work):
+    agent.do_write({"path": "a.txt", "content": "1"})
+    agent.do_write({"path": "a.txt", "content": "2"})
+    assert (work / "a.txt").read_text() == "2"
+    agent._undo_last(); assert (work / "a.txt").read_text() == "1"
+    agent._undo_last(); assert not (work / "a.txt").exists()
+
+
+# ------------------------------------------------------------------ multi-line input
+def _feed(monkeypatch, lines):
+    it = iter(lines)
+    monkeypatch.setattr("builtins.input", lambda *a: next(it))
+
+
+def test_read_task_single_line(monkeypatch):
+    _feed(monkeypatch, ["just one line"])
+    assert agent._read_task("> ") == "just one line"
+
+
+def test_read_task_fenced_block(monkeypatch):
+    _feed(monkeypatch, ["```", "line 1", "line 2", "```"])
+    assert agent._read_task("> ") == "line 1\nline 2"
+
+
+def test_read_task_triplequote_block(monkeypatch):
+    _feed(monkeypatch, ['"""', "a", "b", '"""'])
+    assert agent._read_task("> ") == "a\nb"
+
+
+def test_read_task_backslash_continuation(monkeypatch):
+    _feed(monkeypatch, ["first \\", "second"])
+    assert agent._read_task("> ") == "first \nsecond"

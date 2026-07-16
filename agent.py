@@ -232,6 +232,8 @@ def _consume_stream(resp, on_delta):
 
 # --------------------------------------------------------------- tool impls
 _read_hashes: dict[str, str] = {}
+# Snapshots for /undo: (path, content-before-the-change | None if the file was new).
+_UNDO: list[tuple[str, str | None]] = []
 
 
 def _safe(path: str) -> Path:
@@ -254,6 +256,7 @@ def do_read(args):
 
 def do_write(args):
     p = _safe(args["path"]); p.parent.mkdir(parents=True, exist_ok=True)
+    _UNDO.append((str(p), p.read_text(errors="replace") if p.exists() else None))
     p.write_text(args["content"])
     _read_hashes.pop(str(p), None)
     return f"Wrote {args['path']} ({len(args['content'])} bytes)."
@@ -280,6 +283,7 @@ def do_edit(args):
     if n > 1 and not args.get("replace_all"):
         return (f"ERROR: old_string appears {n} times — add surrounding context to make it "
                 f"unique, or set replace_all=true.")
+    _UNDO.append((str(p), text))
     p.write_text(text.replace(old, new))
     _read_hashes.pop(str(p), None)
     return f"Edited {args['path']} — {n} replacement{'s' if n != 1 else ''}."
@@ -340,6 +344,26 @@ def do_ls(args):
     if not p.exists():
         return f"ERROR: {p} not found."
     return "\n".join(sorted(x.name for x in p.iterdir())) or "(empty)"
+
+
+def _undo_last():
+    """Revert the most recent write_file / edit_file. Returns a status string."""
+    if not _UNDO:
+        return "nothing to undo"
+    path, prior = _UNDO.pop()
+    try:
+        rel = os.path.relpath(path, WORKDIR)
+    except ValueError:
+        rel = path
+    _read_hashes.pop(path, None)
+    if prior is None:
+        try:
+            Path(path).unlink()
+        except FileNotFoundError:
+            pass
+        return f"undo: removed {rel} (it was newly created)"
+    Path(path).write_text(prior)
+    return f"undo: restored {rel}"
 
 
 DISPATCH = {"read_file": do_read, "write_file": do_write, "edit_file": do_edit,
@@ -639,6 +663,7 @@ def _banner():
 _HELP = [
     ("/help", "show this help"),
     ("/clear", "reset the conversation (keep project context)"),
+    ("/undo", "revert the last file change (write / edit)"),
     ("/map", "print the project file tree"),
     ("/model [name]", "show or switch the model"),
     ("/cwd", "print the working directory"),
@@ -651,8 +676,41 @@ def _print_help():
     for cmd, desc in _HELP:
         print("  " + _c("tool", f"{cmd:<15}") + _c("arg", desc))
     print(_c("arg", "  anything else is sent to the agent as a task."))
+    print(_c("arg", "  multi-line: end a line with \\ to continue, or wrap a block in ``` … ```"))
     tip = "prompts before writes/commands" if _INTERACTIVE and not _AUTO_YES else "auto-approving actions"
     print(_c("arg", f"  ({tip}; y/n/a at the prompt — 'a' allows that tool all session.)"))
+
+
+def _read_task(prompt):
+    """Read one task, with multi-line support. A line that is just ``` (or \"\"\") opens a
+    block that runs until the matching closing fence; or end any line with \\ to continue
+    onto the next. The first read propagates EOF/Ctrl-C so the caller can quit."""
+    line = input(prompt)
+    fence = line.strip()
+    if fence in ("```", '"""'):
+        body = []
+        while True:
+            try:
+                nxt = input(_c("arg", "… "))
+            except EOFError:
+                break
+            if nxt.strip() == fence:
+                break
+            body.append(nxt)
+        return "\n".join(body)
+    if line.rstrip().endswith("\\"):
+        parts = [line.rstrip()[:-1]]
+        while True:
+            try:
+                nxt = input(_c("arg", "… "))
+            except EOFError:
+                break
+            cont = nxt.rstrip().endswith("\\")
+            parts.append(nxt.rstrip()[:-1] if cont else nxt)
+            if not cont:
+                break
+        return "\n".join(parts)
+    return line
 
 
 def repl():
@@ -664,7 +722,7 @@ def repl():
     messages = _base_messages()
     while True:
         try:
-            task = input("\n" + _c("brand", "› "))
+            task = _read_task("\n" + _c("brand", "› "))
         except (EOFError, KeyboardInterrupt):
             print("\nbye"); return
         t = task.strip()
@@ -674,6 +732,8 @@ def repl():
             print("bye"); return
         if t in ("/help", "/?", "help"):
             _print_help(); continue
+        if t == "/undo":
+            print(_c("arg", _undo_last())); continue
         if t == "/map":
             print(_c("arg", project_map())); continue
         if t == "/cwd":

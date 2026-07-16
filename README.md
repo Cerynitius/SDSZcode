@@ -57,8 +57,11 @@ icon, prints a project file map on start, and takes follow-up tasks (multi-turn)
 Running `sdszcode` with no task opens a session that feels like Claude Code:
 
 - **Welcome box** with the model and working directory.
-- **Slash commands:** `/help`, `/clear` (reset the conversation), `/map` (file tree),
-  `/model [name]` (show or switch the model), `/cwd`, `/exit`.
+- **Slash commands:** `/help`, `/clear` (reset the conversation), `/undo` (revert the
+  last file change), `/map` (file tree), `/model [name]` (show or switch the model),
+  `/cwd`, `/exit`.
+- **Multi-line input:** end a line with `\` to continue, or wrap a block in a
+  ` ``` ` (or `"""`) fence — handy for pasting code. The whole block is sent as one task.
 - **Tool calls** render as `● tool(arg)` with an indented `⎿` result summary.
 - **Permission prompts before anything side-effecting.** Before `run_bash`,
   `write_file`, or `edit_file` runs, you get a `[Y]es / [n]o / [a]lways` prompt —
@@ -66,6 +69,8 @@ Running `sdszcode` with no task opens a session that feels like Claude Code:
   `a` (always) trusts that tool for the rest of the session; read-only tools
   (`read_file`, `grep`, `list_dir`) never prompt. `--yes` skips the prompts, and
   one-shot / piped runs auto-approve.
+- **`/undo`** reverts the most recent `write_file` / `edit_file` — restoring the previous
+  contents, or deleting the file if it was newly created. Repeat it to walk further back.
 
 The underlying [safety guard](#safety) (the bash allow/deny list) still applies
 regardless of what you approve.
