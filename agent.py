@@ -253,8 +253,12 @@ def do_edit(args):
     text = p.read_text(errors="replace")
     n = text.count(old)
     if n == 0:
-        return ("ERROR: old_string not found. Copy it EXACTLY from the file including "
-                "indentation and whitespace (read the file first if unsure).")
+        # The model often gets here by hallucinating file contents — re-ground it by
+        # showing the ACTUAL current file, so it stops guessing.
+        preview = text if len(text) <= 2500 else text[:2500] + "\n…(truncated)"
+        return (f"ERROR: old_string not found in {args['path']}. Do NOT guess its contents — the "
+                f"ACTUAL current file is below; copy old_string from it verbatim (whitespace "
+                f"included):\n---8<---\n{preview}\n---8<---")
     if n > 1 and not args.get("replace_all"):
         return (f"ERROR: old_string appears {n} times — add surrounding context to make it "
                 f"unique, or set replace_all=true.")

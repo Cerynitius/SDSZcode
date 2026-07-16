@@ -27,9 +27,11 @@ def test_edit_unique(work):
     assert (work / "f.py").read_text() == "a = 42\nb = 2\n"
 
 
-def test_edit_not_found(work):
-    (work / "f.py").write_text("x = 1\n")
-    assert "not found" in agent.do_edit({"path": "f.py", "old_string": "zzz", "new_string": "y"})
+def test_edit_not_found_regrounds_with_actual_content(work):
+    (work / "f.py").write_text("real_marker = 123\n")
+    r = agent.do_edit({"path": "f.py", "old_string": "zzz_imagined", "new_string": "y"})
+    assert "not found" in r
+    assert "real_marker = 123" in r  # re-grounds the model on the real file
 
 
 def test_edit_multiple_requires_context(work):
