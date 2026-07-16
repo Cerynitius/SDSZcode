@@ -115,6 +115,13 @@ Flags override the environment. Example: `sdszcode -C ~/proj -s 24 "add a --json
   then makes the model admit uncertainty instead of confabulating confident-sounding
   facts. This curbs *factual* hallucination; *code-structure* confabulation (inventing
   files/symbols) is caught by the exact-match `edit_file` re-grounding above.
+- **Repetition breaker** — small models sometimes spiral into repeating a token or line
+  until the budget is spent; the streamed output is watched and cut off the moment a
+  spiral is detected (`(cut off: runaway repetition)`).
+- **Stall guard** — stops after a few consecutive tool-taking turns that change nothing
+  and reveal nothing new, rather than spinning to the step limit (`AGENT_STALL_LIMIT`).
+- **Act-don't-narrate nudge** — if a turn *describes* an action ("Let me read…") without
+  emitting the tool call, it's nudged to actually call the tool (up to `AGENT_MAX_NUDGES`).
 
 ### Configuration (env vars)
 
@@ -124,6 +131,9 @@ Flags override the environment. Example: `sdszcode -C ~/proj -s 24 "add a --json
 | `CODING_API_KEY` | – (required) | API key |
 | `CODING_API_MODEL` | `deepseek-v4-flash` | model id |
 | `AGENT_MAX_STEPS` | `16` | max tool-call rounds |
+| `AGENT_STALL_LIMIT` | `3` | stop after N no-progress tool turns |
+| `AGENT_MAX_NUDGES` | `2` | max "act, don't narrate" nudges per task |
+| `CODING_API_THINKING` | `low` | reasoning depth (`low`/`high`/`max`); `low` works best here |
 | `CODING_API_ANTI_HALLUCINATION` | `on` | `off` lets the model confabulate; leave `on` |
 | `AGENT_ALLOW_ANY` | – | set to `1` to disable the shell safety guard (sandboxes only) |
 

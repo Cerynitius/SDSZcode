@@ -40,6 +40,10 @@ MAX_STEPS = int(os.getenv("AGENT_MAX_STEPS", "16"))
 # acting): stop after this many consecutive tool-taking turns that change nothing and
 # surface no new information.
 STALL_LIMIT = int(os.getenv("AGENT_STALL_LIMIT", "3"))
+# Small models sometimes describe a tool action in prose ("Let me read the file…") without
+# emitting the tool call. When a no-tool turn reads as intent-to-act, nudge it to actually
+# call the tool — up to this many times per task before accepting the answer as final.
+MAX_NUDGES = int(os.getenv("AGENT_MAX_NUDGES", "2"))
 # Shared-GPU backends return 503 while busy and can stay saturated ~a minute, so be
 # patient: ~8 retries with backoff capped at 15s.
 RETRIES = int(os.getenv("AGENT_RETRIES", "8"))
@@ -48,6 +52,10 @@ MAX_BACKOFF = int(os.getenv("AGENT_MAX_BACKOFF", "15"))
 # uncertainty instead of confabulating. A coding agent wants this on, so default it on.
 # Sent both as a header (clean) and a body field (survives header-stripping proxies).
 ANTI_HALLUCINATION = os.getenv("CODING_API_ANTI_HALLUCINATION", "on").strip().lower()
+# Reasoning depth (X-Thinking / reasoning_effort). At `low` this small model tends to
+# narrate actions in prose instead of emitting tool calls; a higher level routes the
+# chain-of-thought into a separate field and keeps content to the actual answer/tool call.
+THINKING = os.getenv("CODING_API_THINKING", "low").strip().lower()
 WORKDIR = Path.cwd()
 
 SYSTEM = """You are a focused coding agent working in the current directory.
@@ -100,7 +108,7 @@ TOOLS = [
 
 # ------------------------------------------------------------------ transport
 _RETRY_CODES = {429, 500, 502, 503, 504}
-_HDRS = {"Content-Type": "application/json", "X-Thinking": "low",
+_HDRS = {"Content-Type": "application/json", "X-Thinking": THINKING,
          "X-Anti-Hallucination": ANTI_HALLUCINATION}
 
 
@@ -140,7 +148,7 @@ def _turn(messages, on_delta=None):
     """One streaming model turn. Streams content via on_delta and returns
     (content, tool_calls, finish_reason). Retries the connection on 5xx/429."""
     body = {"model": MODEL, "messages": messages, "tools": TOOLS, "tool_choice": "auto",
-            "max_tokens": 2048, "reasoning_effort": "low", "temperature": 0, "stream": True,
+            "max_tokens": 2048, "reasoning_effort": THINKING, "temperature": 0, "stream": True,
             "anti_hallucination": ANTI_HALLUCINATION != "off"}
     data = json.dumps(body).encode()
     for attempt in range(RETRIES + 1):
@@ -448,7 +456,7 @@ def _repair_args(name: str, raw: str):
     ]
     try:
         txt = _post({"model": MODEL, "messages": msgs, "max_tokens": 1024, "temperature": 0,
-                     "reasoning_effort": "low", "anti_hallucination": ANTI_HALLUCINATION != "off"},
+                     "reasoning_effort": THINKING, "anti_hallucination": ANTI_HALLUCINATION != "off"},
                     timeout=120)["choices"][0]["message"].get("content") or ""
         js = _extract_json(txt)
         out = json.loads(js) if js else None
@@ -617,11 +625,18 @@ def _authorize(name, args):
                    "explain the options or try a different approach.")
 
 
+# Intent-to-act narration: a turn that *says* it will use a tool but emits none.
+_ACTION_HINT = re.compile(
+    r"\b(?:let me|i'?ll|i will|i'?m going to|i need to|i should|next[,]? i|let'?s)\s+"
+    r"(?:now\s+)?(?:read|open|view|inspect|examine|check|look|grep|search|find|run|"
+    r"execute|edit|write|create|modify|patch|fix|update|add|remove|delete)\b", re.I)
+
+
 def run_turn(messages):
     """Run the agent loop over `messages` until a final (no-tool) answer, streaming
     output and rendering tool calls. Mutates `messages`. Returns the final text."""
     recent = []
-    stall, seen_info = 0, set()
+    stall, seen_info, nudges = 0, set(), 0
     for _ in range(MAX_STEPS):
         printed = [False]
 
@@ -640,6 +655,17 @@ def run_turn(messages):
 
         if not tcs:
             final = _strip_filler(content)
+            # Narrated an action but called no tool → nudge it to actually act (capped).
+            if nudges < MAX_NUDGES and _ACTION_HINT.search(final or ""):
+                nudges += 1
+                messages.append({"role": "assistant", "content": content})
+                messages.append({"role": "user", "content":
+                    "You described an action but did not call any tool. Do NOT narrate actions "
+                    "in prose — emit the actual tool call now (read_file / grep / edit_file / "
+                    "run_bash / list_dir). If the task is genuinely finished, say so in one short "
+                    "sentence instead."})
+                print(_c("arg", "  (nudge: narrated an action without calling a tool)"))
+                continue
             messages.append({"role": "assistant", "content": final})
             if not printed[0] and final:
                 print(_c("stream", final))

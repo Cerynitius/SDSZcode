@@ -622,3 +622,68 @@ def test_run_turn_new_info_resets_stall(work, monkeypatch):
     monkeypatch.setattr(agent, "_turn", lambda messages, on_delta=None: next(seq))
     monkeypatch.setattr(agent, "STALL_LIMIT", 3)
     assert agent.run_turn([]) == "finished"     # never hit 3 consecutive no-progress turns
+
+
+# ------------------------------------------------------------------ narration nudge
+def test_action_hint_detects_intent():
+    assert agent._ACTION_HINT.search("Let me read the file to see the bug.")
+    assert agent._ACTION_HINT.search("I'll run the tests now.")
+    assert agent._ACTION_HINT.search("Next, I will edit mathx.py.")
+
+
+def test_action_hint_ignores_conclusions():
+    assert not agent._ACTION_HINT.search("The tests pass and the bug is fixed.")
+    assert not agent._ACTION_HINT.search("Done. factorial now returns 120.")
+
+
+def test_run_turn_nudges_then_accepts(work, monkeypatch):
+    # First turn narrates without a tool call -> nudge; second is a real answer.
+    seq = iter([
+        ("Let me read mathx.py to find the bug.", [], "stop"),
+        ("The bug is fixed and tests pass.", [], "stop"),
+    ])
+    monkeypatch.setattr(agent, "_turn", lambda messages, on_delta=None: next(seq))
+    monkeypatch.setattr(agent, "MAX_NUDGES", 2)
+    msgs = []
+    out = agent.run_turn(msgs)
+    assert out == "The bug is fixed and tests pass."
+    # a corrective user message was injected between the two turns
+    assert any(m["role"] == "user" and "did not call any tool" in m["content"] for m in msgs)
+
+
+def test_run_turn_nudge_capped(work, monkeypatch):
+    # Always narrating: after MAX_NUDGES it must give up and return the text, not loop.
+    calls = {"n": 0}
+
+    def fake_turn(messages, on_delta=None):
+        calls["n"] += 1
+        return ("Let me check the file again.", [], "stop")
+
+    monkeypatch.setattr(agent, "_turn", fake_turn)
+    monkeypatch.setattr(agent, "MAX_NUDGES", 2)
+    out = agent.run_turn([])
+    assert out == "Let me check the file again."
+    assert calls["n"] == 3          # initial + 2 nudges, then accept
+
+
+def test_thinking_defaults_consistent():
+    # Header and the module-level THINKING agree (both come from the same env var).
+    assert agent._HDRS["X-Thinking"] == agent.THINKING
+
+
+def test_thinking_threads_into_request_body(monkeypatch):
+    # _turn reads THINKING at call time, so overriding it changes reasoning_effort.
+    monkeypatch.setattr(agent, "THINKING", "high")
+    captured = {}
+
+    class FakeStream:
+        def __iter__(self):
+            return iter([b"data: [DONE]"])
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(agent.urllib.request, "urlopen",
+                        lambda req, timeout=None: (captured.update(body=json.loads(req.data.decode())) or FakeStream()))
+    agent._turn([{"role": "user", "content": "x"}])
+    assert captured["body"]["reasoning_effort"] == "high"
