@@ -52,7 +52,23 @@ sdszcode "fix the failing tests"    # one-shot: run a single task and exit
 
 The interactive UI streams the model's output live, renders each tool call with an
 icon, prints a project file map on start, and takes follow-up tasks (multi-turn).
-`/map` reprints the file tree, `/exit` quits.
+### Interactive session (Claude-Code style)
+
+Running `sdszcode` with no task opens a session that feels like Claude Code:
+
+- **Welcome box** with the model and working directory.
+- **Slash commands:** `/help`, `/clear` (reset the conversation), `/map` (file tree),
+  `/model [name]` (show or switch the model), `/cwd`, `/exit`.
+- **Tool calls** render as `● tool(arg)` with an indented `⎿` result summary.
+- **Permission prompts before anything side-effecting.** Before `run_bash`,
+  `write_file`, or `edit_file` runs, you get a `[Y]es / [n]o / [a]lways` prompt —
+  and for edits/writes a **coloured diff preview** of exactly what will change.
+  `a` (always) trusts that tool for the rest of the session; read-only tools
+  (`read_file`, `grep`, `list_dir`) never prompt. `--yes` skips the prompts, and
+  one-shot / piped runs auto-approve.
+
+The underlying [safety guard](#safety) (the bash allow/deny list) still applies
+regardless of what you approve.
 
 ### CLI flags
 
@@ -64,6 +80,7 @@ sdszcode [OPTIONS] [TASK]
   -b, --base URL       API base URL
   -k, --key KEY        API key (else CODING_API_KEY)
   -s, --max-steps N    max tool-call rounds per task (default: 16)
+  -y, --yes            skip permission prompts — auto-approve every write/command
       --allow-any      disable the shell safety guard (sandboxes/trusted dirs only)
       --no-color       plain output (also auto-off when piped or NO_COLOR is set)
   -V, --version        print version

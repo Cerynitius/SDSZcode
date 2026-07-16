@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sdszcode"
-version = "0.1.0"
+version = "0.2.0"
 description = "A tiny coding-agent CLI tuned for small / local coding models."
 readme = "README.md"
 requires-python = ">=3.9"

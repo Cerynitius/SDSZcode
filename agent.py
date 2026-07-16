@@ -5,15 +5,17 @@ Adapts to the failure modes small models show in agent loops (looping on re-read
 claiming success without running, filler padding, malformed tool JSON, flaky/
 capacity-limited backends) and gives them a clean interactive terminal UI.
 
-Interactive:   sdszcode                  (or: python3 agent.py)
-One-shot:      sdszcode "your task"      (or: python3 agent.py "your task")
-Flags:         sdszcode --help           (--dir, --model, --base, --max-steps, ...)
+Interactive:   sdszcode                  a Claude-Code-style session (slash commands,
+                                         permission prompts + diff preview before writes)
+One-shot:      sdszcode "your task"      run a single task and exit (auto-approves)
+Flags:         sdszcode --help           (--dir, --model, --max-steps, --yes, ...)
 
 Config via env: CODING_API_BASE, CODING_API_KEY (required), CODING_API_MODEL,
 AGENT_MAX_STEPS, AGENT_RETRIES, AGENT_MAX_BACKOFF, AGENT_ALLOW_ANY.
 """
 from __future__ import annotations
 
+import difflib
 import hashlib
 import json
 import os
@@ -26,7 +28,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 BASE = os.getenv("CODING_API_BASE", "http://127.0.0.1:8000/v1").rstrip("/")
 KEY = os.getenv("CODING_API_KEY", "")
@@ -415,12 +417,19 @@ def project_map(root: Path | None = None, max_entries: int = 200) -> str:
 
 
 # ---------------------------------------------------------------- UI / loop
-_ICON = {"read_file": "○", "write_file": "✚", "edit_file": "✎", "grep": "⌕",
-         "run_bash": "▸", "list_dir": "☰"}
-_C = {"brand": "173", "tool": "173", "arg": "240", "ok": "108", "bad": "167", "stream": "180"}
+_C = {"brand": "173", "tool": "173", "arg": "240", "ok": "108", "bad": "167",
+      "stream": "180", "frame": "138"}
 # Colour when writing to a real terminal (respect the NO_COLOR convention); the CLI's
 # --no-color flag flips this off. Non-tty (pipes, CI) is auto-plain.
 _USE_COLOR = sys.stdout.isatty() and not os.getenv("NO_COLOR")
+_ANSI_RE = re.compile(r"\033\[[0-9;]*m")
+
+# Interactive/permission state. Side-effecting tools are confirmed before they run,
+# Claude-Code style; read-only tools never prompt. Set in the REPL / by --yes.
+_NEEDS_OK = {"write_file", "edit_file", "run_bash"}
+_ALWAYS_ALLOW: set[str] = set()
+_INTERACTIVE = False   # True inside the REPL — enables the permission prompts
+_AUTO_YES = False      # --yes: approve every action without prompting
 
 
 def _ansi(num, s):
@@ -431,20 +440,117 @@ def _c(code, s):
     return _ansi(_C[code], s)
 
 
+def _wlen(s):
+    return len(_ANSI_RE.sub("", str(s)))
+
+
+def _short(path):
+    home = str(Path.home())
+    return str(path).replace(home, "~", 1) if str(path).startswith(home) else str(path)
+
+
+def _box(lines, pad=2):
+    """A rounded, coloured frame around already-styled lines (Claude-Code welcome look)."""
+    w = max((_wlen(l) for l in lines), default=0) + pad * 2
+    bar = "─" * w
+    out = [_c("frame", "╭" + bar + "╮")]
+    for l in lines:
+        gap = w - _wlen(l) - pad * 2
+        out.append(_c("frame", "│") + " " * pad + str(l) + " " * (gap + pad) + _c("frame", "│"))
+    out.append(_c("frame", "╰" + bar + "╯"))
+    return "\n".join(out)
+
+
 def _render_tool(name, args, bad=False):
-    icon = _ICON.get(name, "·")
-    a = ", ".join(f"{k}={str(v)[:44]}" for k, v in args.items() if k != "content")
-    if isinstance(args, dict) and "content" in args:
-        a += (", " if a else "") + f"content=<{len(str(args['content']))}b>"
+    """Claude-Code style: `● tool(primary-arg)`."""
     col = _C["bad"] if bad else _C["tool"]
-    sys.stdout.write(f"  {_ansi(col, f'{icon} {name}')} {_c('arg', a)}\n")
+    inner = str(args.get("error", "")) if bad else _fmt_args(name, args)
+    sys.stdout.write(f"{_ansi(col, '●')} {name}({_c('arg', inner)})\n")
+
+
+def _fmt_args(name, args):
+    if not isinstance(args, dict):
+        return ""
+    if name == "run_bash":
+        return str(args.get("cmd", ""))[:90]
+    if name in ("read_file", "write_file", "edit_file", "list_dir"):
+        return str(args.get("path", ""))
+    if name == "grep":
+        return str(args.get("pattern", ""))
+    return ", ".join(f"{k}={str(v)[:32]}" for k, v in args.items() if k != "content")
 
 
 def _render_result(result):
+    """Claude-Code style: an indented `⎿` summary line under the tool call."""
     s = str(result)
-    line = s.splitlines()[0] if s.strip() else "(empty)"
-    col = _C["bad"] if s.startswith(("ERROR", "REFUSED", "LOOP")) else _C["ok"]
-    sys.stdout.write(f"    {_ansi(col, line[:110])}\n")
+    lines = s.splitlines()
+    first = lines[0] if s.strip() else "(empty)"
+    bad = s.startswith(("ERROR", "REFUSED", "LOOP"))
+    col = _C["bad"] if bad else _C["ok"]
+    extra = f"  (+{len(lines) - 1} lines)" if len(lines) > 1 else ""
+    sys.stdout.write(f"  {_c('arg', '⎿')} {_ansi(col, first[:120])}{_c('arg', extra)}\n")
+
+
+def _print_diff(before, after, path, max_lines=40):
+    diff = list(difflib.unified_diff(before.splitlines(), after.splitlines(), lineterm="", n=1))
+    shown = 0
+    for ln in diff[2:]:  # skip the ---/+++ file header
+        if shown >= max_lines:
+            sys.stdout.write(_c("arg", f"    … ({len(diff) - 2 - shown} more diff lines)\n"))
+            break
+        if ln.startswith("+"):
+            sys.stdout.write(_ansi(_C["ok"], f"    + {ln[1:]}") + "\n")
+        elif ln.startswith("-"):
+            sys.stdout.write(_ansi(_C["bad"], f"    - {ln[1:]}") + "\n")
+        elif ln.startswith("@@"):
+            sys.stdout.write(_c("arg", f"    {ln}") + "\n")
+        else:
+            sys.stdout.write(_c("arg", f"      {ln[1:] if ln[:1] == ' ' else ln}") + "\n")
+        shown += 1
+
+
+def _preview_change(name, args):
+    """Show a diff of what write_file / edit_file is about to do."""
+    try:
+        p = _safe(args.get("path", ""))
+    except Exception:  # noqa: BLE001
+        return
+    cur = p.read_text(errors="replace") if p.exists() else ""
+    if name == "write_file":
+        new = str(args.get("content", ""))
+    else:  # edit_file
+        old, rep = args.get("old_string", ""), args.get("new_string", "")
+        new = cur.replace(old, rep) if old and old in cur else None
+    if new is None or new == cur:
+        return
+    tag = "(new file)" if not cur else ""
+    sys.stdout.write(_c("arg", f"  {args.get('path', '')} {tag}\n"))
+    _print_diff(cur, new, args.get("path", ""))
+
+
+def _authorize(name, args):
+    """Gate side-effecting tools behind a permission prompt (interactive only).
+
+    Returns (allowed, denial_message). Read-only tools, --yes, an earlier "always",
+    and non-interactive/piped runs all pass straight through.
+    """
+    if (name not in _NEEDS_OK or _AUTO_YES or name in _ALWAYS_ALLOW
+            or not _INTERACTIVE or not sys.stdin.isatty()):
+        return True, None
+    if name in ("edit_file", "write_file"):
+        _preview_change(name, args)
+    try:
+        raw = input(f"  {_c('arg', '⎿')} {name}: [Y]es / [n]o / [a]lways › ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        raw = "n"
+    if raw in ("a", "always"):
+        _ALWAYS_ALLOW.add(name)
+        return True, None
+    if raw in ("", "y", "yes"):
+        return True, None
+    return False, ("REFUSED by the user — they declined this action. Do NOT repeat it; "
+                   "explain the options or try a different approach.")
 
 
 def run_turn(messages):
@@ -456,12 +562,14 @@ def run_turn(messages):
 
         def on_delta(t, printed=printed):
             if not printed[0]:
-                sys.stdout.write(f"\033[38;5;{_C['stream']}m"); printed[0] = True
+                if _USE_COLOR:
+                    sys.stdout.write(f"\033[38;5;{_C['stream']}m")
+                printed[0] = True
             sys.stdout.write(t); sys.stdout.flush()
 
         content, tcs, _finish = _turn(messages, on_delta)
         if printed[0]:
-            sys.stdout.write("\033[0m\n")
+            sys.stdout.write("\033[0m\n" if _USE_COLOR else "\n")
 
         if not tcs:
             final = _strip_filler(content)
@@ -491,10 +599,14 @@ def run_turn(messages):
             elif name not in DISPATCH:
                 result = f"ERROR: unknown tool '{name}'. Available tools: {', '.join(DISPATCH)}."
             else:
-                try:
-                    result = DISPATCH[name](args)
-                except Exception as e:  # noqa: BLE001
-                    result = f"ERROR: {e}"
+                ok, denial = _authorize(name, args)
+                if not ok:
+                    result = denial
+                else:
+                    try:
+                        result = DISPATCH[name](args)
+                    except Exception as e:  # noqa: BLE001
+                        result = f"ERROR: {e}"
             _render_result(result)
             messages.append({"role": "tool", "tool_call_id": tc["id"], "content": str(result)})
     print(_c("bad", "● stopped: hit max steps"))
@@ -509,19 +621,46 @@ def _base_messages():
 def run(task: str):
     """One-shot: run a single task and exit."""
     messages = _base_messages() + [{"role": "user", "content": task}]
-    print(_c("arg", f"▶ {WORKDIR}") + "\n")
+    print(_c("arg", f"▶ {_short(WORKDIR)}") + "\n")
     return run_turn(messages)
 
 
 def _banner():
-    print(_c("brand", "▐ SDSZcode") + "  " + _c("arg", f"{MODEL} · {WORKDIR}"))
+    print(_box([
+        _c("brand", "✻ SDSZcode") + _c("arg", f"   v{__version__}"),
+        "",
+        _c("arg", "model  ") + _ansi(_C["tool"], MODEL),
+        _c("arg", "cwd    ") + _short(WORKDIR),
+        "",
+        _c("arg", "/help for commands  ·  /exit to quit"),
+    ]))
+
+
+_HELP = [
+    ("/help", "show this help"),
+    ("/clear", "reset the conversation (keep project context)"),
+    ("/map", "print the project file tree"),
+    ("/model [name]", "show or switch the model"),
+    ("/cwd", "print the working directory"),
+    ("/exit", "quit (also Ctrl-D)"),
+]
+
+
+def _print_help():
+    print(_c("brand", "Commands"))
+    for cmd, desc in _HELP:
+        print("  " + _c("tool", f"{cmd:<15}") + _c("arg", desc))
+    print(_c("arg", "  anything else is sent to the agent as a task."))
+    tip = "prompts before writes/commands" if _INTERACTIVE and not _AUTO_YES else "auto-approving actions"
+    print(_c("arg", f"  ({tip}; y/n/a at the prompt — 'a' allows that tool all session.)"))
 
 
 def repl():
+    global MODEL, _INTERACTIVE
+    _INTERACTIVE = True
     _banner()
     tree = project_map().splitlines()
-    print(_c("arg", "\n".join("  " + t for t in tree[:14]) + ("\n  …" if len(tree) > 14 else "")))
-    print(_c("arg", "type a task · /map to show files · /exit to quit"))
+    print("\n" + _c("arg", "\n".join("  " + t for t in tree[:12]) + ("\n  …" if len(tree) > 12 else "")))
     messages = _base_messages()
     while True:
         try:
@@ -533,8 +672,24 @@ def repl():
             continue
         if t in ("/exit", "/quit", "/q", "exit", "quit"):
             print("bye"); return
+        if t in ("/help", "/?", "help"):
+            _print_help(); continue
         if t == "/map":
             print(_c("arg", project_map())); continue
+        if t == "/cwd":
+            print(_c("arg", str(WORKDIR))); continue
+        if t == "/clear":
+            messages = _base_messages(); _read_hashes.clear()
+            print(_c("arg", "context cleared")); continue
+        if t.split()[0] == "/model":
+            parts = t.split(maxsplit=1)
+            if len(parts) == 2:
+                MODEL = parts[1].strip(); print(_c("arg", f"model → {MODEL}"))
+            else:
+                print(_c("arg", f"model: {MODEL}"))
+            continue
+        if t.startswith("/"):
+            print(_c("bad", f"unknown command {t.split()[0]} — /help for the list")); continue
         messages.append({"role": "user", "content": task})
         try:
             run_turn(messages)
@@ -561,6 +716,8 @@ def _build_parser():
     p.add_argument("-k", "--key", metavar="KEY", help="API key (else read from CODING_API_KEY)")
     p.add_argument("-s", "--max-steps", type=int, metavar="N",
                    help=f"max tool-call rounds per task (default: {MAX_STEPS})")
+    p.add_argument("-y", "--yes", action="store_true",
+                   help="skip permission prompts — auto-approve every write/command")
     p.add_argument("--allow-any", action="store_true",
                    help="disable the shell safety guard — sandboxes/trusted dirs only")
     p.add_argument("--no-color", action="store_true", help="disable coloured output")
@@ -570,7 +727,7 @@ def _build_parser():
 
 def main(argv=None):
     """CLI entry point. Returns a process exit code."""
-    global BASE, KEY, MODEL, MAX_STEPS, WORKDIR, _USE_COLOR
+    global BASE, KEY, MODEL, MAX_STEPS, WORKDIR, _USE_COLOR, _AUTO_YES
     args = _build_parser().parse_args(argv)
 
     if args.base:
@@ -581,6 +738,8 @@ def main(argv=None):
         MODEL = args.model
     if args.max_steps is not None:
         MAX_STEPS = args.max_steps
+    if args.yes:
+        _AUTO_YES = True
     if args.allow_any:
         os.environ["AGENT_ALLOW_ANY"] = "1"
     if args.no_color:

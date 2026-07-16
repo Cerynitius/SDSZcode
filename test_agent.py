@@ -390,3 +390,74 @@ def test_main_version_exits():
     with pytest.raises(SystemExit) as e:
         agent.main(["--version"])
     assert e.value.code == 0
+
+
+# ------------------------------------------------------ permissions / Claude-Code UX
+def test_read_only_tool_never_prompts(monkeypatch):
+    monkeypatch.setattr(agent, "_INTERACTIVE", True)
+    monkeypatch.setattr("builtins.input",
+                        lambda *a: (_ for _ in ()).throw(AssertionError("should not prompt")))
+    ok, denial = agent._authorize("read_file", {"path": "x"})
+    assert ok is True and denial is None
+
+
+def test_authorize_denies_bash_on_no(monkeypatch):
+    monkeypatch.setattr(agent, "_INTERACTIVE", True)
+    monkeypatch.setattr(agent.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda *a: "n")
+    ok, denial = agent._authorize("run_bash", {"cmd": "ls"})
+    assert ok is False and "REFUSED" in denial
+
+
+def test_authorize_always_skips_future_prompts(monkeypatch):
+    monkeypatch.setattr(agent, "_INTERACTIVE", True)
+    monkeypatch.setattr(agent.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(agent, "_ALWAYS_ALLOW", set())
+    monkeypatch.setattr("builtins.input", lambda *a: "a")
+    ok, _ = agent._authorize("run_bash", {"cmd": "ls"})
+    assert ok and "run_bash" in agent._ALWAYS_ALLOW
+    monkeypatch.setattr("builtins.input",
+                        lambda *a: (_ for _ in ()).throw(AssertionError("should not prompt again")))
+    assert agent._authorize("run_bash", {"cmd": "pwd"})[0] is True
+
+
+def test_auto_yes_bypasses_prompt(monkeypatch):
+    monkeypatch.setattr(agent, "_INTERACTIVE", True)
+    monkeypatch.setattr(agent, "_AUTO_YES", True)
+    monkeypatch.setattr("builtins.input",
+                        lambda *a: (_ for _ in ()).throw(AssertionError("should not prompt")))
+    assert agent._authorize("write_file", {"path": "a", "content": "b"})[0] is True
+
+
+def test_run_turn_denied_write_not_executed(work, monkeypatch):
+    monkeypatch.setattr(agent, "_INTERACTIVE", True)
+    monkeypatch.setattr(agent.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda *a: "n")
+    turns = iter([
+        ("", [{"id": "t1", "type": "function", "function": {
+            "name": "write_file", "arguments": json.dumps({"path": "z.txt", "content": "hi"})}}], "tool_calls"),
+        ("done", [], "stop"),
+    ])
+    monkeypatch.setattr(agent, "_turn", lambda messages, on_delta=None: next(turns))
+    msgs = []
+    agent.run_turn(msgs)
+    assert not (work / "z.txt").exists()                     # write was blocked
+    tool_msgs = [m for m in msgs if m.get("role") == "tool"]
+    assert tool_msgs and "REFUSED" in tool_msgs[0]["content"]  # model is told it was refused
+
+
+def test_preview_change_shows_diff(work, capsys):
+    (work / "f.py").write_text("a = 1\n")
+    agent._preview_change("edit_file", {"path": "f.py", "old_string": "a = 1", "new_string": "a = 2"})
+    out = capsys.readouterr().out
+    assert "- a = 1" in out and "+ a = 2" in out
+
+
+def test_parser_yes_flag():
+    assert agent._build_parser().parse_args(["-y", "task"]).yes is True
+    assert agent._build_parser().parse_args(["task"]).yes is False
+
+
+def test_box_frames_content():
+    box = agent._box(["hello"])
+    assert box.startswith("╭") and box.rstrip().endswith("╯") and "hello" in box
