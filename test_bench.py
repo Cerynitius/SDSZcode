@@ -48,13 +48,34 @@ def test_bar():
 
 
 @pytest.mark.parametrize("name", list(bench.TASKS))
-def test_planted_bug_actually_fails(tmp_path, name):
-    # Sanity: each benchmark task's seeded files must FAIL their own check — otherwise
-    # the task measures nothing.
+def test_unfixed_task_fails(tmp_path, name):
+    # Sanity: each task's seed (plus its hidden grading test) must FAIL before any fix —
+    # otherwise the task measures nothing.
     task = bench.TASKS[name]
-    for rel, content in task["files"].items():
+    for rel, content in {**task["files"], **task.get("hidden_files", {})}.items():
         (tmp_path / rel).write_text(content)
     assert bench.check_pass(task["check"], str(tmp_path)) is False
+
+
+def test_every_task_has_a_tier():
+    assert all(t["tier"] in bench.TIERS for t in bench.TASKS.values())
+
+
+def test_select_tasks():
+    assert bench.select_tasks(None, "easy") == ["factorial", "max_of", "fizzbuzz"]
+    assert bench.select_tasks(None, "hard") == ["palindrome", "money"]
+    assert set(bench.select_tasks(None, "all")) == set(bench.TASKS)
+    assert set(bench.select_tasks("all", "easy")) == set(bench.TASKS)      # --tasks all wins
+    assert bench.select_tasks("factorial,money", "easy") == ["factorial", "money"]
+
+
+def test_hidden_task_solved_passes(tmp_path):
+    # The reference solution for a hard task must pass its hidden test.
+    (tmp_path / "strutil.py").write_text(
+        "def is_palindrome(s):\n    t = s.replace(' ', '').lower()\n    return t == t[::-1]\n")
+    for rel, content in bench.TASKS["palindrome"].get("hidden_files", {}).items():
+        (tmp_path / rel).write_text(content)
+    assert bench.check_pass(bench.TASKS["palindrome"]["check"], str(tmp_path)) is True
 
 
 def test_check_pass_true_on_green(tmp_path):

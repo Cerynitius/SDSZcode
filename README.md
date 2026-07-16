@@ -185,24 +185,31 @@ repair).
 
 ### Benchmarking pass rate
 
-`bench.py` measures how reliably the harness fixes bugs. It seeds fresh temp projects
-with planted bugs (each has a pytest that fails until fixed), runs the agent N times
-per task against the **real** backend, and reports the pass rate plus timing and
-guard-signal stats — so parameter changes can be compared with numbers, not vibes:
+`bench.py` measures how reliably the harness completes tasks, across three difficulty
+tiers. It seeds fresh temp projects, runs the agent N times per task against the **real**
+backend, and reports the pass rate plus timing and guard-signal stats — so parameter
+changes can be compared with numbers, not vibes:
+
+- **easy** — single file, single-function bug; a failing test points right at it.
+- **medium** — 2+ files; the bug is *not* where the test fails, so it must be traced.
+- **hard** — no visible test (implement to a spec) or a coordinated multi-file change;
+  graded by a **hidden** test dropped in only after the agent finishes.
 
 ```bash
 export CODING_API_KEY=sk-...
-python3 bench.py                        # all tasks, 5 runs each
-python3 bench.py --tasks factorial --runs 10
-CODING_API_THINKING=high python3 bench.py --tasks factorial --runs 10   # A/B a setting
+python3 bench.py                         # easy tier, 5 runs each
+python3 bench.py --tier all --runs 10
+python3 bench.py --tier hard --runs 5
+CODING_API_THINKING=high python3 bench.py --tier medium   # A/B a setting
+python3 bench.py --list                 # tasks and their tiers
 ```
 
 Example output:
 
 ```
-task            pass    rate   avg s  signals
-factorial      1/2      50%    52.1  tools=28 edit=3 cut=3 nudge=2 stall=0
-OVERALL        1/2      50%    52.1  ██████████░░░░░░░░░░
+task         tier       pass    rate   avg s  signals
+factorial    easy      1/2      50%    52.1  tools=28 edit=3 cut=3 nudge=2 stall=0
+OVERALL                1/2      50%    52.1  ██████████░░░░░░░░░░
 ```
 
 ## Status
