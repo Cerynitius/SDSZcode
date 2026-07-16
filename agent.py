@@ -45,7 +45,12 @@ Rules you MUST follow:
    rewrite the whole file with write_file. Use write_file only to create new files.
 4. Do NOT read the same file more than once — you already have its content. Use grep
    to locate things instead of reading everything.
-5. When the task is done, give ONE short final sentence and STOP. No goodbyes, no
+5. Ground EVERY change in the actual file contents you read and the actual command
+   output you saw. NEVER invent functions, classes, tests, or error messages you have
+   not literally seen — if unsure, read or grep first.
+6. Run Python tests with `python -m pytest` (bare `pytest` often can't import a local
+   package). Always look at the real output before deciding what to fix.
+7. When the task is done, give ONE short final sentence and STOP. No goodbyes, no
    repetition, no filler.
 Use the provided tools. Reason briefly, then act."""
 
