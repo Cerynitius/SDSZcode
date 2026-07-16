@@ -294,6 +294,9 @@ def run(task: str):
             if recent_sigs[-3:].count(sig) >= 3:
                 result = ("LOOP DETECTED: you have issued this exact tool call repeatedly. "
                           "Stop. Use what you already have and give your final answer now.")
+            elif name not in DISPATCH:
+                # The model sometimes invents tool names; steer it back to the real ones.
+                result = f"ERROR: unknown tool '{name}'. Available tools: {', '.join(DISPATCH)}."
             else:
                 try:
                     result = DISPATCH[name](args)
