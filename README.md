@@ -183,6 +183,28 @@ guard, the shell safety guard, JSON extraction/repair, 503 retry/backoff, filler
 stripping, and the core run loop (tool dispatch, unknown-tool guidance, in-loop JSON
 repair).
 
+### Benchmarking pass rate
+
+`bench.py` measures how reliably the harness fixes bugs. It seeds fresh temp projects
+with planted bugs (each has a pytest that fails until fixed), runs the agent N times
+per task against the **real** backend, and reports the pass rate plus timing and
+guard-signal stats — so parameter changes can be compared with numbers, not vibes:
+
+```bash
+export CODING_API_KEY=sk-...
+python3 bench.py                        # all tasks, 5 runs each
+python3 bench.py --tasks factorial --runs 10
+CODING_API_THINKING=high python3 bench.py --tasks factorial --runs 10   # A/B a setting
+```
+
+Example output:
+
+```
+task            pass    rate   avg s  signals
+factorial      1/2      50%    52.1  tools=28 edit=3 cut=3 nudge=2 stall=0
+OVERALL        1/2      50%    52.1  ██████████░░░░░░░░░░
+```
+
 ## Status
 
 Early and evolving — we're tuning it as we learn more about how small coding models
