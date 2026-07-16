@@ -33,6 +33,10 @@ BASE = os.getenv("CODING_API_BASE", "http://127.0.0.1:8000/v1").rstrip("/")
 KEY = os.getenv("CODING_API_KEY", "")
 MODEL = os.getenv("CODING_API_MODEL", "deepseek-v4-flash")
 MAX_STEPS = int(os.getenv("AGENT_MAX_STEPS", "16"))
+# This backend is a shared GPU that returns 503 while busy and can stay saturated for
+# a minute under load, so be patient: ~8 retries with backoff capped at 15s.
+RETRIES = int(os.getenv("AGENT_RETRIES", "8"))
+MAX_BACKOFF = int(os.getenv("AGENT_MAX_BACKOFF", "15"))
 WORKDIR = Path.cwd()
 
 SYSTEM = """You are a focused coding agent working in the current directory.
@@ -72,9 +76,10 @@ TOOLS = [
 _RETRY_CODES = {429, 500, 502, 503, 504}
 
 
-def _post(body, timeout=180, retries=5):
+def _post(body, timeout=180, retries=None):
     """POST to the endpoint with backoff. This backend is capacity-limited and returns
     503 when the shared GPU is busy, so transient 5xx/429 are retried, not fatal."""
+    retries = RETRIES if retries is None else retries
     data = json.dumps(body).encode()
     for attempt in range(retries + 1):
         req = urllib.request.Request(BASE + "/chat/completions", data=data,
@@ -85,7 +90,7 @@ def _post(body, timeout=180, retries=5):
                 return json.loads(r.read())
         except urllib.error.HTTPError as e:
             if e.code in _RETRY_CODES and attempt < retries:
-                wait = min(2 ** attempt, 10)
+                wait = min(2 ** attempt, MAX_BACKOFF)
                 ra = (e.headers.get("Retry-After") or "").strip()
                 if ra.isdigit():
                     wait = max(wait, int(ra))
@@ -95,7 +100,7 @@ def _post(body, timeout=180, retries=5):
             raise
         except (urllib.error.URLError, TimeoutError):
             if attempt < retries:
-                time.sleep(min(2 ** attempt, 10))
+                time.sleep(min(2 ** attempt, MAX_BACKOFF))
                 continue
             raise
     raise RuntimeError("unreachable")
