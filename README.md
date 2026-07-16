@@ -66,6 +66,19 @@ re-emit valid JSON (a cheap retry) instead of wasting an agent turn.
 directory escapes. **It is not a real sandbox** — an allow-listed interpreter can
 still do anything. Run untrusted tasks inside a container or VM.
 
+## Development
+
+Run the regression tests — fully mocked (no network, no real model):
+
+```bash
+pytest -q
+```
+
+They lock in the harness behaviours: edit_file's uniqueness rules, the read loop
+guard, the shell safety guard, JSON extraction/repair, 503 retry/backoff, filler
+stripping, and the core run loop (tool dispatch, unknown-tool guidance, in-loop JSON
+repair).
+
 ## Status
 
 Early and evolving — we're tuning it as we learn more about how small coding models
