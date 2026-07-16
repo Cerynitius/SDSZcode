@@ -24,6 +24,8 @@ import os
 import re
 import subprocess
 import sys
+import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -67,14 +69,42 @@ TOOLS = [
 ]
 
 
+_RETRY_CODES = {429, 500, 502, 503, 504}
+
+
+def _post(body, timeout=180, retries=5):
+    """POST to the endpoint with backoff. This backend is capacity-limited and returns
+    503 when the shared GPU is busy, so transient 5xx/429 are retried, not fatal."""
+    data = json.dumps(body).encode()
+    for attempt in range(retries + 1):
+        req = urllib.request.Request(BASE + "/chat/completions", data=data,
+            headers={"Authorization": f"Bearer {KEY}", "Content-Type": "application/json", "X-Thinking": "low"},
+            method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            if e.code in _RETRY_CODES and attempt < retries:
+                wait = min(2 ** attempt, 10)
+                ra = (e.headers.get("Retry-After") or "").strip()
+                if ra.isdigit():
+                    wait = max(wait, int(ra))
+                sys.stderr.write(f"    \033[90m(backend {e.code}; retry {attempt+1}/{retries} in {wait}s)\033[0m\n")
+                time.sleep(wait)
+                continue
+            raise
+        except (urllib.error.URLError, TimeoutError):
+            if attempt < retries:
+                time.sleep(min(2 ** attempt, 10))
+                continue
+            raise
+    raise RuntimeError("unreachable")
+
+
 def _api(messages):
     body = {"model": MODEL, "messages": messages, "tools": TOOLS, "tool_choice": "auto",
             "max_tokens": 2048, "reasoning_effort": "low", "temperature": 0}
-    req = urllib.request.Request(BASE + "/chat/completions", data=json.dumps(body).encode(),
-        headers={"Authorization": f"Bearer {KEY}", "Content-Type": "application/json", "X-Thinking": "low"},
-        method="POST")
-    with urllib.request.urlopen(req, timeout=180) as r:
-        return json.loads(r.read())["choices"][0]
+    return _post(body)["choices"][0]
 
 
 # ---- tool implementations -------------------------------------------------
@@ -215,11 +245,7 @@ def _repair_args(name: str, raw: str):
     ]
     body = {"model": MODEL, "messages": msgs, "max_tokens": 1024, "temperature": 0, "reasoning_effort": "low"}
     try:
-        req = urllib.request.Request(BASE + "/chat/completions", data=json.dumps(body).encode(),
-            headers={"Authorization": f"Bearer {KEY}", "Content-Type": "application/json", "X-Thinking": "low"},
-            method="POST")
-        with urllib.request.urlopen(req, timeout=120) as r:
-            txt = json.loads(r.read())["choices"][0]["message"].get("content") or ""
+        txt = _post(body, timeout=120)["choices"][0]["message"].get("content") or ""
         js = _extract_json(txt)
         out = json.loads(js) if js else None
         return out if isinstance(out, dict) else None
@@ -278,4 +304,11 @@ if __name__ == "__main__":
     if not KEY:
         print("Set CODING_API_KEY (and optionally CODING_API_BASE, CODING_API_MODEL).", file=sys.stderr); sys.exit(1)
     print(f"\033[1m▶ task:\033[0m {sys.argv[1]}\n\033[1m▶ dir:\033[0m {WORKDIR}\n")
-    run(sys.argv[1])
+    try:
+        run(sys.argv[1])
+    except urllib.error.HTTPError as e:
+        print(f"\n\033[91m● backend error: HTTP {e.code} {e.reason}\033[0m — the shared endpoint is "
+              f"overloaded even after retries; try again shortly.", file=sys.stderr)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print("\n(interrupted)", file=sys.stderr); sys.exit(130)
