@@ -39,17 +39,27 @@ Rules you MUST follow:
 2. NEVER claim code works, compiles, or that tests pass unless you actually ran it
    with run_bash in THIS session and saw the output. If you wrote or changed code,
    run it before concluding.
-3. Do NOT read the same file more than once — you already have its content.
-4. When the task is done, give ONE short final sentence and STOP. No goodbyes, no
+3. To change an EXISTING file, use edit_file (a precise search/replace) — do NOT
+   rewrite the whole file with write_file. Use write_file only to create new files.
+4. Do NOT read the same file more than once — you already have its content.
+5. When the task is done, give ONE short final sentence and STOP. No goodbyes, no
    repetition, no filler.
 Use the provided tools. Reason briefly, then act."""
 
 TOOLS = [
     {"type": "function", "function": {"name": "read_file", "description": "Read a text file.",
         "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}},
-    {"type": "function", "function": {"name": "write_file", "description": "Create or overwrite a file.",
+    {"type": "function", "function": {"name": "write_file", "description": "Create or overwrite a whole file (use for NEW files).",
         "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
                        "required": ["path", "content"]}}},
+    {"type": "function", "function": {"name": "edit_file",
+        "description": "Precisely edit an existing file by replacing an exact substring. old_string must "
+                       "match the file exactly (including whitespace) and be unique unless replace_all is true. "
+                       "Prefer this over rewriting the whole file.",
+        "parameters": {"type": "object", "properties": {
+            "path": {"type": "string"}, "old_string": {"type": "string"}, "new_string": {"type": "string"},
+            "replace_all": {"type": "boolean", "description": "Replace every occurrence (default false)."}},
+            "required": ["path", "old_string", "new_string"]}}},
     {"type": "function", "function": {"name": "run_bash", "description": "Run a shell command in the working dir and return its output.",
         "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}}},
     {"type": "function", "function": {"name": "list_dir", "description": "List files in a directory (default '.').",
@@ -95,6 +105,29 @@ def do_write(args):
     p.write_text(args["content"])
     _read_hashes.pop(str(p), None)  # content changed; allow a fresh read
     return f"Wrote {args['path']} ({len(args['content'])} bytes)."
+
+
+def do_edit(args):
+    p = _safe(args["path"])
+    if not p.exists():
+        return f"ERROR: {args['path']} does not exist — use write_file to create it."
+    old = args.get("old_string", "")
+    new = args.get("new_string", "")
+    if not old:
+        return "ERROR: old_string is required and must be non-empty."
+    if old == new:
+        return "ERROR: old_string and new_string are identical — nothing to change."
+    text = p.read_text(errors="replace")
+    n = text.count(old)
+    if n == 0:
+        return ("ERROR: old_string not found. Copy it EXACTLY from the file including "
+                "indentation and whitespace (read the file first if unsure).")
+    if n > 1 and not args.get("replace_all"):
+        return (f"ERROR: old_string appears {n} times — add surrounding context to make it "
+                f"unique, or set replace_all=true.")
+    p.write_text(text.replace(old, new))
+    _read_hashes.pop(str(p), None)
+    return f"Edited {args['path']} — {n} replacement{'s' if n != 1 else ''}."
 
 
 # --- run_bash safety guard -------------------------------------------------
@@ -144,7 +177,8 @@ def do_ls(args):
     return "\n".join(sorted(x.name for x in p.iterdir())) or "(empty)"
 
 
-DISPATCH = {"read_file": do_read, "write_file": do_write, "run_bash": do_bash, "list_dir": do_ls}
+DISPATCH = {"read_file": do_read, "write_file": do_write, "edit_file": do_edit,
+            "run_bash": do_bash, "list_dir": do_ls}
 
 
 def _strip_filler(text: str) -> str:
@@ -153,6 +187,44 @@ def _strip_filler(text: str) -> str:
     # collapse repeated trailing "Done." / "OK." style lines
     text = re.sub(r"(?:\s*(?:Done|OK|No further (?:needs|questions)|I'm satisfied)\.?){2,}\s*$", "", text.strip())
     return text.strip()
+
+
+def _extract_json(text: str):
+    """Pull the first balanced {...} object out of a blob of text."""
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return None
+
+
+def _repair_args(name: str, raw: str):
+    """JSON retry: ask the model to re-emit valid JSON args for a tool call it botched.
+    Returns a dict on success, else None. One extra cheap call, not a whole agent turn."""
+    msgs = [
+        {"role": "system", "content": "Output ONLY one valid minified JSON object — no prose, no markdown, no code fences."},
+        {"role": "user", "content": f"This was meant to be the JSON arguments for the tool `{name}` but "
+                                     f"it is not valid JSON:\n{raw}\nReturn the corrected JSON object only."},
+    ]
+    body = {"model": MODEL, "messages": msgs, "max_tokens": 1024, "temperature": 0, "reasoning_effort": "low"}
+    try:
+        req = urllib.request.Request(BASE + "/chat/completions", data=json.dumps(body).encode(),
+            headers={"Authorization": f"Bearer {KEY}", "Content-Type": "application/json", "X-Thinking": "low"},
+            method="POST")
+        with urllib.request.urlopen(req, timeout=120) as r:
+            txt = json.loads(r.read())["choices"][0]["message"].get("content") or ""
+        js = _extract_json(txt)
+        out = json.loads(js) if js else None
+        return out if isinstance(out, dict) else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def run(task: str):
@@ -170,16 +242,22 @@ def run(task: str):
         for tc in tcs:
             name = tc["function"]["name"]
             raw = tc["function"].get("arguments") or "{}"
+            repaired = False
             try:
                 args = json.loads(raw)
             except ValueError:
-                # tolerate malformed tool JSON instead of crashing the loop
-                result = f"ERROR: your tool arguments were not valid JSON: {raw[:120]}"
-                print(f"  step {step}: {name}  \033[91m[bad JSON args]\033[0m")
-                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
-                continue
+                # JSON retry: ask the model to resend valid JSON rather than wasting a turn.
+                args = _repair_args(name, raw)
+                if not isinstance(args, dict):
+                    print(f"  step {step}: {name}  \033[91m[bad JSON args — unrepairable]\033[0m")
+                    messages.append({"role": "tool", "tool_call_id": tc["id"], "content":
+                        "ERROR: your tool arguments were not valid JSON and could not be repaired. "
+                        "Resend this call with ONE valid JSON object; escape newlines as \\n and quotes as \\\"."})
+                    continue
+                repaired = True
             sig = f"{name}:{json.dumps(args, sort_keys=True)}"
-            print(f"  step {step}: {name}({', '.join(f'{k}={str(v)[:30]!r}' for k,v in args.items())})")
+            tag = " \033[93m[JSON repaired]\033[0m" if repaired else ""
+            print(f"  step {step}: {name}({', '.join(f'{k}={str(v)[:30]!r}' for k,v in args.items())}){tag}")
             # generic loop guard: same tool+args 3x in a row -> intervene
             recent_sigs.append(sig)
             if recent_sigs[-3:].count(sig) >= 3:

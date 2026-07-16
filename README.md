@@ -43,8 +43,11 @@ python3 agent.py "Write fib.py with an iterative fib(n) plus asserts, and make t
 
 ### Tools the agent has
 
-`read_file`, `write_file`, `run_bash`, `list_dir` — enough to write code, run it, and
-iterate.
+`read_file`, `write_file`, `edit_file` (precise search/replace), `run_bash`,
+`list_dir` — enough to write code, patch it, run it, and iterate.
+
+Robustness: if the model emits malformed JSON tool arguments, the harness asks it to
+re-emit valid JSON (a cheap retry) instead of wasting an agent turn.
 
 ### Configuration (env vars)
 
