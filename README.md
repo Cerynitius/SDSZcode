@@ -79,6 +79,32 @@ icon, prints a project file map on start, and takes follow-up tasks (multi-turn)
 directory escapes. **It is not a real sandbox** — an allow-listed interpreter can
 still do anything. Run untrusted tasks inside a container or VM.
 
+## What to expect (and why the guards matter)
+
+Small coding models are useful in a loop but they misbehave, and SDSZcode is built to
+make that *safe* rather than to pretend it doesn't happen. Observed with
+`deepseek-v4-flash`:
+
+- **Confabulation on multi-file tasks.** It will sometimes invent files, methods,
+  tests, and error messages it never actually read, then confidently "fix" the
+  fictional version. In one run it hallucinated an entire alternate module and tried
+  to patch it — every one of those edits **failed harmlessly** because `edit_file`
+  requires an exact, unique match against the real file. The real bug (in a different
+  file it *did* read correctly) got fixed; nothing was corrupted.
+  → *This is why the strict exact-match `edit_file` is the single most important safety
+  feature.* A fuzzy or whole-file-rewrite editor would have let the hallucination
+  overwrite correct code.
+- **Leaked control tokens.** It emits chat-template markers (`<｜…｜>`, fake
+  `</tool_result>` blocks) into its output. The harness strips these from the stream
+  and from history so they don't pollute the display or compound.
+- **Filler / repeated goodbyes.** Trimmed from the final answer.
+- **Better with feedback than from scratch.** Give it failing tests to fix and it runs
+  them, sees the error, and iterates; ask it to write correct code cold and verify the
+  result yourself.
+
+Practical guidance: keep tasks well-scoped, prefer a test-driven loop, and treat the
+harness's guards (not the model's confidence) as the source of safety.
+
 ## Development
 
 Run the regression tests — fully mocked (no network, no real model):

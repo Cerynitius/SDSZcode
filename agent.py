@@ -139,8 +139,35 @@ def _turn(messages, on_delta=None):
     raise RuntimeError("unreachable")
 
 
+# Small models leak chat-template control tokens into `content` — deepseek uses
+# full-width-pipe markers like <｜DSML｜tool_result｜> and fake </tool_result> blocks.
+# Left in, they pollute the display AND feed back into history, compounding confusion.
+_LEAK = re.compile(r"<[^<>]*｜[^<>]*>|</?\s*tool_(?:result|call)\s*>", re.I)
+
+
+class _StreamCleaner:
+    """Strips leaked control tokens from streamed content, holding back a partial
+    marker (one already containing ｜) across chunks so it isn't printed mid-form."""
+
+    def __init__(self):
+        self.hold = ""
+
+    def feed(self, text: str) -> str:
+        s = _LEAK.sub("", self.hold + text)
+        self.hold = ""
+        m = re.search(r"<[^>｜]*｜[^>]*$", s)  # a dangling '<…｜…' with no closing '>'
+        if m:
+            self.hold, s = s[m.start():], s[:m.start()]
+        return s
+
+    def flush(self) -> str:
+        s, self.hold = _LEAK.sub("", self.hold), ""
+        return s
+
+
 def _consume_stream(resp, on_delta):
     content, calls, finish = "", {}, None
+    cleaner = _StreamCleaner()
     try:
         for raw in resp:
             line = raw.decode("utf-8", "replace").strip()
@@ -157,9 +184,11 @@ def _consume_stream(resp, on_delta):
             if ch.get("finish_reason"):
                 finish = ch["finish_reason"]
             if delta.get("content"):
-                content += delta["content"]
-                if on_delta:
-                    on_delta(delta["content"])
+                clean = cleaner.feed(delta["content"])
+                if clean:
+                    content += clean
+                    if on_delta:
+                        on_delta(clean)
             for tc in (delta.get("tool_calls") or []):
                 c = calls.setdefault(tc.get("index", 0), {"id": None, "name": "", "args": ""})
                 if tc.get("id"):
@@ -168,6 +197,11 @@ def _consume_stream(resp, on_delta):
                 c["name"] += fn.get("name") or ""
                 c["args"] += fn.get("arguments") or ""
     finally:
+        tail = cleaner.flush()
+        if tail:
+            content += tail
+            if on_delta:
+                on_delta(tail)
         try:
             resp.close()
         except Exception:  # noqa: BLE001
@@ -293,10 +327,14 @@ DISPATCH = {"read_file": do_read, "write_file": do_write, "edit_file": do_edit,
 # ------------------------------------------------------------------- helpers
 def _strip_filler(text: str) -> str:
     """Cut the model's trailing goodbye/meta/repetition padding."""
-    t = text.strip()
-    t = re.split(r"\b(?:Goodbye|GOODBYE|END)\b|\n?\s*Final (?:message|brief|answer|statement)\b|"
-                 r"\bNo further (?:needs|questions|actions?)\b", t)[0].strip()
-    t = re.sub(r"(?:\s*(?:Done|OK|Okay|That's it|All set|I'm satisfied)[.!]?){1,}\s*$", "", t).strip()
+    t = _LEAK.sub("", text).strip()
+    t = re.split(
+        r"\b(?:Goodbye|Bye|farewell|Terminate)\b|\bSECOND FINAL\b|"
+        r"\bNo further (?:needs|questions|actions?|issues?)\b|"
+        r"\n?\s*Final (?:message|brief|statement)\b|\bEND\b",
+        t, maxsplit=1, flags=re.I)[0].strip()
+    t = re.sub(r"(?:\s*(?:Done|OK|Okay|That's it|All set|I'm satisfied|Task (?:finished|complete[d]?))[.!]?){1,}\s*$",
+               "", t, flags=re.I).strip()
     return t
 
 

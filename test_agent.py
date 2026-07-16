@@ -247,6 +247,53 @@ def test_run_unknown_tool_is_guided(work, monkeypatch):
     assert any("unknown tool 'open_for_editing'" in c and "write_file" in c for c in results)
 
 
+# ------------------------------------------------------- leaked-token cleaning
+def test_stream_cleaner_strips_leak_tokens():
+    c = agent._StreamCleaner()
+    out = c.feed("Hello <｜DSML｜tool_result｜>x</｜tool_result｜> world") + c.flush()
+    assert "DSML" not in out and "｜" not in out
+    assert "Hello" in out and "world" in out
+
+
+def test_stream_cleaner_holds_partial_marker_across_chunks():
+    c = agent._StreamCleaner()
+    a = c.feed("done <｜tool")
+    b = c.feed("_result｜> ok")
+    assert "tool" not in (a + b) and "｜" not in (a + b)
+    assert "done" in (a + b) and "ok" in (a + b)
+
+
+def test_stream_cleaner_leaves_plain_angle_brackets():
+    c = agent._StreamCleaner()
+    assert c.feed("if a < b and c > d: pass") + c.flush() == "if a < b and c > d: pass"
+
+
+def test_strip_filler_repetitive_goodbyes():
+    ans = "All tests pass.\n\nSECOND FINAL STATEMENT. farewell.Bye.FINAL ANSWER: again."
+    assert agent._strip_filler(ans) == "All tests pass."
+
+
+def test_turn_cleans_leaked_content(monkeypatch):
+    lines = [
+        b'data: {"choices":[{"delta":{"content":"Result: "}}]}',
+        b'data: {"choices":[{"delta":{"content":"<\xef\xbd\x9cDSML\xef\xbd\x9ctool_result\xef\xbd\x9c>"}}]}',
+        b'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}',
+        b'data: [DONE]',
+    ]
+
+    class FakeStream:
+        def __iter__(self):
+            return iter(lines)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(agent.urllib.request, "urlopen", lambda req, timeout=None: FakeStream())
+    content, _tcs, _finish = agent._turn([{"role": "user", "content": "x"}])
+    assert "DSML" not in content and "｜" not in content
+    assert "Result:" in content and "ok" in content
+
+
 def test_run_repairs_bad_json_in_loop(work, monkeypatch):
     turns = iter([
         ("", [{"id": "t1", "type": "function", "function": {
