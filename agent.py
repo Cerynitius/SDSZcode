@@ -36,6 +36,10 @@ BASE = os.getenv("CODING_API_BASE", "http://127.0.0.1:8000/v1").rstrip("/")
 KEY = os.getenv("CODING_API_KEY", "")
 MODEL = os.getenv("CODING_API_MODEL", "deepseek-v4-flash")
 MAX_STEPS = int(os.getenv("AGENT_MAX_STEPS", "16"))
+# Cut losses when the model spins without progress (small models confabulate instead of
+# acting): stop after this many consecutive tool-taking turns that change nothing and
+# surface no new information.
+STALL_LIMIT = int(os.getenv("AGENT_STALL_LIMIT", "3"))
 # Shared-GPU backends return 503 while busy and can stay saturated ~a minute, so be
 # patient: ~8 retries with backoff capped at 15s.
 RETRIES = int(os.getenv("AGENT_RETRIES", "8"))
@@ -65,6 +69,10 @@ Rules you MUST follow:
    already pass when you run them) — say so in ONE short sentence and STOP. Do NOT
    invent extra problems, refactors, "hidden issues", or fictional legacy code to work
    on. No goodbyes, no repetition, no filler.
+8. Only discuss functions, files, and symbols that a tool ACTUALLY returned in this
+   session. Do NOT "double-check" or reason about code you have not seen. If you suspect
+   another function/file exists, grep for it FIRST — if grep does not find it, it does
+   not exist, so do not mention it. The file has ONLY what read_file/grep showed you.
 Use the provided tools. Reason briefly, then act."""
 
 TOOLS = [
@@ -613,6 +621,7 @@ def run_turn(messages):
     """Run the agent loop over `messages` until a final (no-tool) answer, streaming
     output and rendering tool calls. Mutates `messages`. Returns the final text."""
     recent = []
+    stall, seen_info = 0, set()
     for _ in range(MAX_STEPS):
         printed = [False]
 
@@ -637,6 +646,7 @@ def run_turn(messages):
             return final
 
         messages.append({"role": "assistant", "content": content, "tool_calls": tcs})
+        progressed = False
         for tc in tcs:
             name = tc["function"]["name"]
             raw = tc["function"].get("arguments") or "{}"
@@ -667,6 +677,21 @@ def run_turn(messages):
                         result = f"ERROR: {e}"
             _render_result(result)
             messages.append({"role": "tool", "tool_call_id": tc["id"], "content": str(result)})
+            # Progress = an actual mutation, or new information we hadn't surfaced before.
+            rstr = str(result)
+            if rstr.startswith(("Wrote", "Edited")):
+                progressed = True
+            elif not rstr.startswith(("ERROR", "REFUSED", "LOOP")) and "already read" not in rstr:
+                info_key = f"{name}:{rstr[:200]}"
+                if info_key not in seen_info:
+                    seen_info.add(info_key)
+                    progressed = True
+
+        stall = 0 if progressed else stall + 1
+        if stall >= STALL_LIMIT:
+            print(_c("bad", f"● stopped: no progress in {stall} turns (stuck or confabulating) — "
+                            f"try rephrasing the task or narrowing it"))
+            return None
     print(_c("bad", "● stopped: hit max steps"))
     return None
 

@@ -565,3 +565,60 @@ def test_consume_stream_cuts_runaway(monkeypatch):
     assert finish == "repetition_cut"
     assert len(content) < 300 * len("response Nope. ")   # stopped early, not the whole flood
     assert not tcs
+
+
+# ------------------------------------------------------------------ stall guard
+def test_run_turn_stops_on_stall(work, monkeypatch):
+    # Every turn takes an action that yields no progress (reads a missing file) — with
+    # distinct paths so the exact-repeat loop guard doesn't fire first. The stall guard
+    # must cut it off at STALL_LIMIT, well before MAX_STEPS.
+    calls = {"n": 0}
+
+    def fake_turn(messages, on_delta=None):
+        calls["n"] += 1
+        i = calls["n"]
+        return ("", [{"id": f"t{i}", "type": "function", "function": {
+            "name": "read_file", "arguments": json.dumps({"path": f"ghost{i}.py"})}}], "tool_calls")
+
+    monkeypatch.setattr(agent, "_turn", fake_turn)
+    monkeypatch.setattr(agent, "STALL_LIMIT", 3)
+    assert agent.run_turn([]) is None
+    assert calls["n"] == 3          # stopped at the stall limit, not MAX_STEPS
+
+
+def test_run_turn_mutations_do_not_stall(work, monkeypatch):
+    # Real changes every turn keep the stall counter at zero past the limit.
+    calls = {"n": 0}
+
+    def fake_turn(messages, on_delta=None):
+        calls["n"] += 1
+        i = calls["n"]
+        if i <= 5:
+            return ("", [{"id": f"t{i}", "type": "function", "function": {
+                "name": "write_file", "arguments": json.dumps({"path": f"f{i}.txt", "content": "x"})}}], "tool_calls")
+        return ("changes applied", [], "stop")
+
+    monkeypatch.setattr(agent, "_turn", fake_turn)
+    monkeypatch.setattr(agent, "STALL_LIMIT", 3)
+    assert agent.run_turn([]) == "changes applied"
+    assert calls["n"] == 6 and (work / "f5.txt").exists()
+
+
+def test_run_turn_new_info_resets_stall(work, monkeypatch):
+    # A no-progress turn, then a genuinely new grep result resets the counter, so the run
+    # continues past STALL_LIMIT worth of interleaved fruitless turns.
+    (work / "real.py").write_text("target = 1\n")
+    seq = iter([
+        ("", [{"id": "a", "type": "function", "function": {
+            "name": "read_file", "arguments": json.dumps({"path": "ghost.py"})}}], "tool_calls"),   # stall 1
+        ("", [{"id": "b", "type": "function", "function": {
+            "name": "grep", "arguments": json.dumps({"pattern": "target"})}}], "tool_calls"),        # progress -> reset
+        ("", [{"id": "c", "type": "function", "function": {
+            "name": "read_file", "arguments": json.dumps({"path": "ghost2.py"})}}], "tool_calls"),   # stall 1
+        ("", [{"id": "d", "type": "function", "function": {
+            "name": "read_file", "arguments": json.dumps({"path": "ghost3.py"})}}], "tool_calls"),   # stall 2
+        ("finished", [], "stop"),
+    ])
+    monkeypatch.setattr(agent, "_turn", lambda messages, on_delta=None: next(seq))
+    monkeypatch.setattr(agent, "STALL_LIMIT", 3)
+    assert agent.run_turn([]) == "finished"     # never hit 3 consecutive no-progress turns
