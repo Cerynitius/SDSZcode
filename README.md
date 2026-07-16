@@ -37,17 +37,30 @@ export CODING_API_BASE="https://your-endpoint/v1"   # OpenAI-compatible base URL
 export CODING_API_KEY="sk-..."                       # your API key
 export CODING_API_MODEL="deepseek-v4-flash"          # optional (this is the default)
 
-# runs in the current directory
-python3 agent.py "Write fib.py with an iterative fib(n) plus asserts, and make the tests pass."
+python3 agent.py                 # interactive: a terminal REPL in the current dir
+python3 agent.py "fix the failing tests"   # one-shot: run a single task and exit
 ```
+
+The interactive UI streams the model's output live, renders each tool call with an
+icon, prints a project file map on start, and takes follow-up tasks (multi-turn).
+`/map` reprints the file tree, `/exit` quits.
 
 ### Tools the agent has
 
-`read_file`, `write_file`, `edit_file` (precise search/replace), `run_bash`,
-`list_dir` — enough to write code, patch it, run it, and iterate.
+`read_file`, `write_file`, `edit_file` (precise search/replace), `grep` (search),
+`run_bash`, `list_dir` — enough to explore, write code, patch it, run it, and iterate.
 
-Robustness: if the model emits malformed JSON tool arguments, the harness asks it to
-re-emit valid JSON (a cheap retry) instead of wasting an agent turn.
+### Robustness built in
+
+- **Streaming** output with a clean, coloured terminal UI.
+- **Project map** injected on start so the model knows the layout without reading
+  everything.
+- **JSON retry** — malformed tool arguments are re-requested, not fatal.
+- **503/backoff retry** — the endpoint may be a capacity-limited shared GPU; transient
+  5xx/429 are retried (configurable via `AGENT_RETRIES` / `AGENT_MAX_BACKOFF`).
+- **Loop guard** — re-reading an unchanged file is refused; a repeated tool call is
+  broken with a nudge.
+- **Unknown-tool guidance** — inventing a tool name returns the real tool list.
 
 ### Configuration (env vars)
 
