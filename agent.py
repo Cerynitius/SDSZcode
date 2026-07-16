@@ -147,7 +147,10 @@ _LEAK = re.compile(r"<[^<>]*｜[^<>]*>|</?\s*tool_(?:result|call)\s*>", re.I)
 
 class _StreamCleaner:
     """Strips leaked control tokens from streamed content, holding back a partial
-    marker (one already containing ｜) across chunks so it isn't printed mid-form."""
+    marker across chunks (a ｜-token or a prefix of a tool_result/call tag) so it is
+    never printed half-formed. Ordinary '<'/'>' in code stream through untouched."""
+
+    _MARKERS = ("</tool_result>", "<tool_result>", "</tool_call>", "<tool_call>")
 
     def __init__(self):
         self.hold = ""
@@ -155,9 +158,11 @@ class _StreamCleaner:
     def feed(self, text: str) -> str:
         s = _LEAK.sub("", self.hold + text)
         self.hold = ""
-        m = re.search(r"<[^>｜]*｜[^>]*$", s)  # a dangling '<…｜…' with no closing '>'
+        m = re.search(r"<[^>]*$", s)  # an unclosed '<…' at the very end
         if m:
-            self.hold, s = s[m.start():], s[:m.start()]
+            tail = s[m.start():]
+            if "｜" in tail or any(k.startswith(tail) for k in self._MARKERS):
+                self.hold, s = tail, s[:m.start()]
         return s
 
     def flush(self) -> str:

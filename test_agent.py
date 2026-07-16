@@ -265,6 +265,14 @@ def test_stream_cleaner_holds_partial_marker_across_chunks():
     assert "done" in (a + b) and "ok" in (a + b)
 
 
+def test_stream_cleaner_holds_plain_tool_marker_across_chunks():
+    c = agent._StreamCleaner()
+    a = c.feed("x </tool")
+    b = c.feed("_result> y")
+    assert "tool" not in (a + b)
+    assert "x" in (a + b) and "y" in (a + b)
+
+
 def test_stream_cleaner_leaves_plain_angle_brackets():
     c = agent._StreamCleaner()
     assert c.feed("if a < b and c > d: pass") + c.flush() == "if a < b and c > d: pass"
