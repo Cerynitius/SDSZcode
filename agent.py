@@ -50,8 +50,10 @@ Rules you MUST follow:
    not literally seen — if unsure, read or grep first.
 6. Run Python tests with `python -m pytest` (bare `pytest` often can't import a local
    package). Always look at the real output before deciding what to fix.
-7. When the task is done, give ONE short final sentence and STOP. No goodbyes, no
-   repetition, no filler.
+7. When the task is done — INCLUDING when it is already satisfied (e.g. the tests
+   already pass when you run them) — say so in ONE short sentence and STOP. Do NOT
+   invent extra problems, refactors, "hidden issues", or fictional legacy code to work
+   on. No goodbyes, no repetition, no filler.
 Use the provided tools. Reason briefly, then act."""
 
 TOOLS = [
