@@ -61,6 +61,11 @@ icon, prints a project file map on start, and takes follow-up tasks (multi-turn)
 - **Loop guard** — re-reading an unchanged file is refused; a repeated tool call is
   broken with a nudge.
 - **Unknown-tool guidance** — inventing a tool name returns the real tool list.
+- **Anti-hallucination on** — every request carries `X-Anti-Hallucination: on` (and an
+  `anti_hallucination` body field, so it survives header-stripping proxies). The backend
+  then makes the model admit uncertainty instead of confabulating confident-sounding
+  facts. This curbs *factual* hallucination; *code-structure* confabulation (inventing
+  files/symbols) is caught by the exact-match `edit_file` re-grounding above.
 
 ### Configuration (env vars)
 
@@ -70,6 +75,7 @@ icon, prints a project file map on start, and takes follow-up tasks (multi-turn)
 | `CODING_API_KEY` | – (required) | API key |
 | `CODING_API_MODEL` | `deepseek-v4-flash` | model id |
 | `AGENT_MAX_STEPS` | `16` | max tool-call rounds |
+| `CODING_API_ANTI_HALLUCINATION` | `on` | `off` lets the model confabulate; leave `on` |
 | `AGENT_ALLOW_ANY` | – | set to `1` to disable the shell safety guard (sandboxes only) |
 
 ## Safety

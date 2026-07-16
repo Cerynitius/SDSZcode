@@ -211,6 +211,30 @@ def test_turn_streams_and_reconstructs_tool_call(monkeypatch):
     assert json.loads(tcs[0]["function"]["arguments"]) == {"path": "x.py"}
 
 
+def test_turn_sends_anti_hallucination(monkeypatch):
+    """The turn carries anti-hallucination on both as a header and a body field."""
+    captured = {}
+
+    class FakeStream:
+        def __iter__(self):
+            return iter([b"data: [DONE]"])
+
+        def close(self):
+            pass
+
+    def fake_urlopen(req, timeout=None):
+        captured["headers"] = req.headers
+        captured["body"] = json.loads(req.data.decode())
+        return FakeStream()
+
+    monkeypatch.setattr(agent.urllib.request, "urlopen", fake_urlopen)
+    agent._turn([{"role": "user", "content": "x"}])
+    # urllib title-cases header keys, so look it up case-insensitively.
+    hdrs = {k.lower(): v for k, v in captured["headers"].items()}
+    assert hdrs["x-anti-hallucination"] == "on"
+    assert captured["body"]["anti_hallucination"] is True
+
+
 # ---------------------------------------------------------------- filler strip
 def test_strip_filler_goodbye():
     assert agent._strip_filler("The answer is 42.\n\nGoodbye.END") == "The answer is 42."

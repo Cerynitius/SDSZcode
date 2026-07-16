@@ -33,6 +33,10 @@ MAX_STEPS = int(os.getenv("AGENT_MAX_STEPS", "16"))
 # patient: ~8 retries with backoff capped at 15s.
 RETRIES = int(os.getenv("AGENT_RETRIES", "8"))
 MAX_BACKOFF = int(os.getenv("AGENT_MAX_BACKOFF", "15"))
+# The coding backend honors an anti-hallucination switch: `on` makes the model admit
+# uncertainty instead of confabulating. A coding agent wants this on, so default it on.
+# Sent both as a header (clean) and a body field (survives header-stripping proxies).
+ANTI_HALLUCINATION = os.getenv("CODING_API_ANTI_HALLUCINATION", "on").strip().lower()
 WORKDIR = Path.cwd()
 
 SYSTEM = """You are a focused coding agent working in the current directory.
@@ -81,7 +85,8 @@ TOOLS = [
 
 # ------------------------------------------------------------------ transport
 _RETRY_CODES = {429, 500, 502, 503, 504}
-_HDRS = {"Content-Type": "application/json", "X-Thinking": "low"}
+_HDRS = {"Content-Type": "application/json", "X-Thinking": "low",
+         "X-Anti-Hallucination": ANTI_HALLUCINATION}
 
 
 def _post(body, timeout=180, retries=None):
@@ -120,7 +125,8 @@ def _turn(messages, on_delta=None):
     """One streaming model turn. Streams content via on_delta and returns
     (content, tool_calls, finish_reason). Retries the connection on 5xx/429."""
     body = {"model": MODEL, "messages": messages, "tools": TOOLS, "tool_choice": "auto",
-            "max_tokens": 2048, "reasoning_effort": "low", "temperature": 0, "stream": True}
+            "max_tokens": 2048, "reasoning_effort": "low", "temperature": 0, "stream": True,
+            "anti_hallucination": ANTI_HALLUCINATION != "off"}
     data = json.dumps(body).encode()
     for attempt in range(RETRIES + 1):
         req = urllib.request.Request(BASE + "/chat/completions", data=data,
@@ -372,8 +378,9 @@ def _repair_args(name: str, raw: str):
                                      f"invalid JSON:\n{raw}\nReturn the corrected JSON object only."},
     ]
     try:
-        txt = _post({"model": MODEL, "messages": msgs, "max_tokens": 1024,
-                     "temperature": 0, "reasoning_effort": "low"}, timeout=120)["choices"][0]["message"].get("content") or ""
+        txt = _post({"model": MODEL, "messages": msgs, "max_tokens": 1024, "temperature": 0,
+                     "reasoning_effort": "low", "anti_hallucination": ANTI_HALLUCINATION != "off"},
+                    timeout=120)["choices"][0]["message"].get("content") or ""
         js = _extract_json(txt)
         out = json.loads(js) if js else None
         return out if isinstance(out, dict) else None
