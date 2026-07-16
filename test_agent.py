@@ -523,3 +523,45 @@ def test_read_task_triplequote_block(monkeypatch):
 def test_read_task_backslash_continuation(monkeypatch):
     _feed(monkeypatch, ["first \\", "second"])
     assert agent._read_task("> ") == "first \nsecond"
+
+
+# ------------------------------------------------------ anti-repetition breaker
+def test_is_runaway_synonym_spiral():
+    # The exact failure seen live: a leaked token + endless synonyms.
+    spiral = "".join(f"response{w}. " for w in
+                     ["Done", "Over", "Completed", "Resolved", "Fixed", "Solved"] * 20)
+    assert agent._is_runaway(spiral) is True
+
+
+def test_is_runaway_repeated_line():
+    assert agent._is_runaway(("No further actions needed.\n" * 12)) is True
+
+
+def test_is_runaway_allows_normal_prose():
+    prose = ("I read mathx.py and found the factorial loop stops one short. "
+             "The fix changes range(1, n) to range(1, n+1) so the final factor is included. "
+             "Then I re-ran pytest and both assertions pass, so the task is complete now.")
+    assert agent._is_runaway(prose) is False
+
+
+def test_is_runaway_allows_short_repeats_in_code():
+    code = "x = 1\ny = 2\nz = x + y\nprint(z)\nreturn z\n"
+    assert agent._is_runaway(code) is False
+
+
+def test_consume_stream_cuts_runaway(monkeypatch):
+    chunk = json.dumps({"choices": [{"delta": {"content": "response Nope. "}}]})
+    lines = [f"data: {chunk}".encode() for _ in range(300)] + [b"data: [DONE]"]
+
+    class FakeStream:
+        def __iter__(self):
+            return iter(lines)
+
+        def close(self):
+            pass
+
+    seen = []
+    content, tcs, finish = agent._consume_stream(FakeStream(), seen.append)
+    assert finish == "repetition_cut"
+    assert len(content) < 300 * len("response Nope. ")   # stopped early, not the whole flood
+    assert not tcs

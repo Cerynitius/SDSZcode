@@ -26,6 +26,8 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import zlib
+from collections import Counter
 from pathlib import Path
 
 __version__ = "0.2.0"
@@ -183,9 +185,32 @@ class _StreamCleaner:
         return s
 
 
+def _is_runaway(text: str) -> bool:
+    """Detect a sustained repetition spiral in the streamed tail — the small-model
+    'dead loop' where it repeats a token (even glued, like `responseDone.responseOver.`),
+    a synonym chain, or the same line over and over. Looks only at the trailing window so
+    it fires on *sustained* loops, not on ordinary repeats in real prose/code.
+
+    Three cheap signals: an identical line repeated many times, one whitespace-token
+    dominating, or a very low compression ratio (the catch-all — repetitive text, even
+    glued, compresses far more than genuine prose or code)."""
+    tail = text[-1500:]
+    lines = [l.strip() for l in tail.splitlines() if l.strip()]
+    if len(lines) >= 8 and Counter(lines).most_common(1)[0][1] >= 6:
+        return True
+    words = re.findall(r"\S+", tail)
+    if len(words) >= 40 and Counter(words).most_common(1)[0][1] / len(words) >= 0.4:
+        return True
+    blob = tail.encode("utf-8", "replace")
+    if len(blob) >= 500 and len(zlib.compress(blob, 6)) / len(blob) < 0.18:
+        return True
+    return False
+
+
 def _consume_stream(resp, on_delta):
     content, calls, finish = "", {}, None
     cleaner = _StreamCleaner()
+    checked_at = 0
     try:
         for raw in resp:
             line = raw.decode("utf-8", "replace").strip()
@@ -207,6 +232,13 @@ def _consume_stream(resp, on_delta):
                     content += clean
                     if on_delta:
                         on_delta(clean)
+                    # Circuit breaker: stop reading once the model falls into a
+                    # repetition spiral, instead of letting it fill the whole budget.
+                    if len(content) > 300 and len(content) - checked_at >= 150:
+                        checked_at = len(content)
+                        if _is_runaway(content):
+                            finish = "repetition_cut"
+                            break
             for tc in (delta.get("tool_calls") or []):
                 c = calls.setdefault(tc.get("index", 0), {"id": None, "name": "", "args": ""})
                 if tc.get("id"):
@@ -594,6 +626,8 @@ def run_turn(messages):
         content, tcs, _finish = _turn(messages, on_delta)
         if printed[0]:
             sys.stdout.write("\033[0m\n" if _USE_COLOR else "\n")
+        if _finish == "repetition_cut":
+            print(_c("arg", "  (cut off: runaway repetition)"))
 
         if not tcs:
             final = _strip_filler(content)
