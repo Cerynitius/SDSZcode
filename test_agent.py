@@ -338,3 +338,55 @@ def test_run_repairs_bad_json_in_loop(work, monkeypatch):
     monkeypatch.setattr(agent, "_repair_args", lambda name, raw: {"path": "z.txt", "content": "yo"})
     agent.run("x")
     assert (work / "z.txt").read_text() == "yo"
+
+
+# ------------------------------------------------------------------ CLI / main
+def test_parser_task_and_flags():
+    args = agent._build_parser().parse_args(["fix", "the", "bug", "-m", "m1", "-s", "3", "--no-color"])
+    assert args.task == ["fix", "the", "bug"]
+    assert args.model == "m1" and args.max_steps == 3 and args.no_color is True
+
+
+def test_main_runs_task_with_overrides(monkeypatch):
+    calls = {}
+    monkeypatch.setattr(agent, "run", lambda task: calls.setdefault("task", task))
+    monkeypatch.setattr(agent, "repl", lambda: calls.setdefault("repl", True))
+    monkeypatch.setattr(agent, "_banner", lambda: None)
+    monkeypatch.setattr(agent, "KEY", "")
+    monkeypatch.setattr(agent, "BASE", "x")
+    monkeypatch.setattr(agent, "MODEL", "x")
+    monkeypatch.setattr(agent, "MAX_STEPS", 1)
+    rc = agent.main(["do", "it", "--key", "sk-x", "--base", "http://h/v1/",
+                     "--model", "mm", "--max-steps", "9"])
+    assert rc == 0 and calls["task"] == "do it" and "repl" not in calls
+    assert agent.BASE == "http://h/v1"   # trailing slash stripped
+    assert agent.MODEL == "mm" and agent.MAX_STEPS == 9 and agent.KEY == "sk-x"
+
+
+def test_main_no_task_starts_repl(monkeypatch):
+    calls = {}
+    monkeypatch.setattr(agent, "repl", lambda: calls.setdefault("repl", True))
+    monkeypatch.setattr(agent, "run", lambda task: calls.setdefault("task", task))
+    monkeypatch.setattr(agent, "KEY", "sk-x")
+    assert agent.main([]) == 0
+    assert calls.get("repl") is True and "task" not in calls
+
+
+def test_main_requires_key(monkeypatch, capsys):
+    monkeypatch.setattr(agent, "KEY", "")
+    monkeypatch.setattr(agent, "run", lambda task: None)
+    monkeypatch.setattr(agent, "repl", lambda: None)
+    assert agent.main(["task"]) == 1
+    assert "key" in capsys.readouterr().err.lower()
+
+
+def test_main_bad_dir(monkeypatch, capsys):
+    monkeypatch.setattr(agent, "KEY", "sk-x")
+    assert agent.main(["task", "--dir", "/no/such/dir/xyz123"]) == 2
+    assert "No such directory" in capsys.readouterr().err
+
+
+def test_main_version_exits():
+    with pytest.raises(SystemExit) as e:
+        agent.main(["--version"])
+    assert e.value.code == 0

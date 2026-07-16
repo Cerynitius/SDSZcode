@@ -5,8 +5,9 @@ Adapts to the failure modes small models show in agent loops (looping on re-read
 claiming success without running, filler padding, malformed tool JSON, flaky/
 capacity-limited backends) and gives them a clean interactive terminal UI.
 
-Interactive:   python3 agent.py
-One-shot:      python3 agent.py "your task"
+Interactive:   sdszcode                  (or: python3 agent.py)
+One-shot:      sdszcode "your task"      (or: python3 agent.py "your task")
+Flags:         sdszcode --help           (--dir, --model, --base, --max-steps, ...)
 
 Config via env: CODING_API_BASE, CODING_API_KEY (required), CODING_API_MODEL,
 AGENT_MAX_STEPS, AGENT_RETRIES, AGENT_MAX_BACKOFF, AGENT_ALLOW_ANY.
@@ -24,6 +25,8 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+__version__ = "0.1.0"
 
 BASE = os.getenv("CODING_API_BASE", "http://127.0.0.1:8000/v1").rstrip("/")
 KEY = os.getenv("CODING_API_KEY", "")
@@ -415,10 +418,17 @@ def project_map(root: Path | None = None, max_entries: int = 200) -> str:
 _ICON = {"read_file": "○", "write_file": "✚", "edit_file": "✎", "grep": "⌕",
          "run_bash": "▸", "list_dir": "☰"}
 _C = {"brand": "173", "tool": "173", "arg": "240", "ok": "108", "bad": "167", "stream": "180"}
+# Colour when writing to a real terminal (respect the NO_COLOR convention); the CLI's
+# --no-color flag flips this off. Non-tty (pipes, CI) is auto-plain.
+_USE_COLOR = sys.stdout.isatty() and not os.getenv("NO_COLOR")
+
+
+def _ansi(num, s):
+    return f"\033[38;5;{num}m{s}\033[0m" if _USE_COLOR else str(s)
 
 
 def _c(code, s):
-    return f"\033[38;5;{_C[code]}m{s}\033[0m"
+    return _ansi(_C[code], s)
 
 
 def _render_tool(name, args, bad=False):
@@ -427,14 +437,14 @@ def _render_tool(name, args, bad=False):
     if isinstance(args, dict) and "content" in args:
         a += (", " if a else "") + f"content=<{len(str(args['content']))}b>"
     col = _C["bad"] if bad else _C["tool"]
-    sys.stdout.write(f"  \033[38;5;{col}m{icon} {name}\033[0m {_c('arg', a)}\n")
+    sys.stdout.write(f"  {_ansi(col, f'{icon} {name}')} {_c('arg', a)}\n")
 
 
 def _render_result(result):
     s = str(result)
     line = s.splitlines()[0] if s.strip() else "(empty)"
     col = _C["bad"] if s.startswith(("ERROR", "REFUSED", "LOOP")) else _C["ok"]
-    sys.stdout.write(f"    \033[38;5;{col}m{line[:110]}\033[0m\n")
+    sys.stdout.write(f"    {_ansi(col, line[:110])}\n")
 
 
 def run_turn(messages):
@@ -534,19 +544,76 @@ def repl():
             print("\n(interrupted)")
 
 
-if __name__ == "__main__":
+def _build_parser():
+    import argparse
+
+    p = argparse.ArgumentParser(
+        prog="sdszcode",
+        description="A tiny coding-agent tuned for small / local coding models.",
+        epilog="With no TASK, starts an interactive session. Settings can also come from "
+               "the environment (CODING_API_KEY, CODING_API_BASE, CODING_API_MODEL).")
+    p.add_argument("task", nargs="*",
+                   help="task to run once, then exit; omit for an interactive session")
+    p.add_argument("-C", "--dir", metavar="PATH",
+                   help="working directory the agent operates in (default: current directory)")
+    p.add_argument("-m", "--model", metavar="NAME", help=f"model id (default: {MODEL})")
+    p.add_argument("-b", "--base", metavar="URL", help=f"API base URL (default: {BASE})")
+    p.add_argument("-k", "--key", metavar="KEY", help="API key (else read from CODING_API_KEY)")
+    p.add_argument("-s", "--max-steps", type=int, metavar="N",
+                   help=f"max tool-call rounds per task (default: {MAX_STEPS})")
+    p.add_argument("--allow-any", action="store_true",
+                   help="disable the shell safety guard — sandboxes/trusted dirs only")
+    p.add_argument("--no-color", action="store_true", help="disable coloured output")
+    p.add_argument("-V", "--version", action="version", version=f"sdszcode {__version__}")
+    return p
+
+
+def main(argv=None):
+    """CLI entry point. Returns a process exit code."""
+    global BASE, KEY, MODEL, MAX_STEPS, WORKDIR, _USE_COLOR
+    args = _build_parser().parse_args(argv)
+
+    if args.base:
+        BASE = args.base.rstrip("/")
+    if args.key:
+        KEY = args.key
+    if args.model:
+        MODEL = args.model
+    if args.max_steps is not None:
+        MAX_STEPS = args.max_steps
+    if args.allow_any:
+        os.environ["AGENT_ALLOW_ANY"] = "1"
+    if args.no_color:
+        _USE_COLOR = False
+    if args.dir:
+        d = Path(args.dir).expanduser()
+        if not d.is_dir():
+            print(f"No such directory: {d}", file=sys.stderr)
+            return 2
+        os.chdir(d)
+        WORKDIR = d.resolve()
+
     if not KEY:
-        print("Set CODING_API_KEY (and optionally CODING_API_BASE, CODING_API_MODEL).", file=sys.stderr)
-        sys.exit(1)
+        print("No API key. Pass --key or set CODING_API_KEY "
+              "(optionally --base / --model).", file=sys.stderr)
+        return 1
+
+    task = " ".join(args.task).strip()
     try:
-        if len(sys.argv) >= 2:
+        if task:
             _banner()
-            run(sys.argv[1])
+            run(task)
         else:
             repl()
     except urllib.error.HTTPError as e:
-        print(f"\n\033[38;5;167m● backend error: HTTP {e.code} {e.reason}\033[0m — overloaded even after "
-              f"retries; try again shortly.", file=sys.stderr)
-        sys.exit(1)
+        print(_c("bad", f"\n● backend error: HTTP {e.code} {e.reason}")
+              + " — overloaded even after retries; try again shortly.", file=sys.stderr)
+        return 1
     except KeyboardInterrupt:
-        print("\n(interrupted)", file=sys.stderr); sys.exit(130)
+        print("\n(interrupted)", file=sys.stderr)
+        return 130
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

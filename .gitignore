@@ -2,3 +2,9 @@ __pycache__/
 *.pyc
 .env
 .DS_Store
+
+# build / packaging artifacts
+*.egg-info/
+build/
+dist/
+.pytest_cache/

@@ -27,23 +27,50 @@ failure, and fixed it to correct, verified code.
 
 ## Requirements
 
-An **OpenAI-compatible** chat-completions endpoint that supports tool calling. Any
-provider works; the defaults target a local `deepseek-v4-flash` server.
+Python 3.9+ and an **OpenAI-compatible** chat-completions endpoint that supports tool
+calling. Any provider works; the defaults target a local `deepseek-v4-flash` server.
+No third-party dependencies — standard library only.
+
+## Install
+
+```bash
+pip install -e .        # installs the `sdszcode` command
+```
+
+Or skip installing and run the script directly with `python3 agent.py`.
 
 ## Usage
 
 ```bash
-export CODING_API_BASE="https://your-endpoint/v1"   # OpenAI-compatible base URL
-export CODING_API_KEY="sk-..."                       # your API key
+export CODING_API_KEY="sk-..."                       # your API key (or pass --key)
+export CODING_API_BASE="https://your-endpoint/v1"    # OpenAI-compatible base URL
 export CODING_API_MODEL="deepseek-v4-flash"          # optional (this is the default)
 
-python3 agent.py                 # interactive: a terminal REPL in the current dir
-python3 agent.py "fix the failing tests"   # one-shot: run a single task and exit
+sdszcode                            # interactive: a terminal REPL in the current dir
+sdszcode "fix the failing tests"    # one-shot: run a single task and exit
 ```
 
 The interactive UI streams the model's output live, renders each tool call with an
 icon, prints a project file map on start, and takes follow-up tasks (multi-turn).
 `/map` reprints the file tree, `/exit` quits.
+
+### CLI flags
+
+```
+sdszcode [OPTIONS] [TASK]
+
+  -C, --dir PATH       working directory the agent operates in (default: current)
+  -m, --model NAME     model id (default: deepseek-v4-flash)
+  -b, --base URL       API base URL
+  -k, --key KEY        API key (else CODING_API_KEY)
+  -s, --max-steps N    max tool-call rounds per task (default: 16)
+      --allow-any      disable the shell safety guard (sandboxes/trusted dirs only)
+      --no-color       plain output (also auto-off when piped or NO_COLOR is set)
+  -V, --version        print version
+  -h, --help           full help
+```
+
+Flags override the environment. Example: `sdszcode -C ~/proj -s 24 "add a --json flag"`.
 
 ### Tools the agent has
 

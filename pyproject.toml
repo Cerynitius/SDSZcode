@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sdszcode"
+version = "0.1.0"
+description = "A tiny coding-agent CLI tuned for small / local coding models."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+keywords = ["coding-agent", "llm", "cli", "openai-compatible"]
+dependencies = []          # standard library only
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+sdszcode = "agent:main"
+
+[tool.setuptools]
+py-modules = ["agent"]
